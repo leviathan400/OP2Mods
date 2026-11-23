@@ -1,0 +1,12 @@
+# MSVC build intermediates
+*.obj
+*.res
+*.exp
+*.pdb
+*.ilk
+
+# Linux build of op2launcher
+OP2Launcher/exe/op2launcher
+
+# logs written next to the game
+*.log

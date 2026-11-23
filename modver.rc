@@ -1,0 +1,45 @@
+// Shared version / branding for all OP2Mods module DLLs.
+// Each module's build.bat compiles this (rc ..\modver.rc) and links the resulting
+// modver.res, so every module shows the same Copyright + Description in Properties.
+//
+// Version: 1.0.0 by default. A module can set its own by compiling with
+//   rc /d MODVER_USE_VERSION_H /i <dir with version.h> ...
+// where version.h defines MODVER_MAJOR / MODVER_MINOR / MODVER_PATCH (see debug\launcher\version.h).
+#include <windows.h>
+
+#ifdef MODVER_USE_VERSION_H
+#include "version.h"
+#endif
+#ifndef MODVER_MAJOR
+#define MODVER_MAJOR 1
+#define MODVER_MINOR 0
+#define MODVER_PATCH 0
+#endif
+
+#define MODVER_STR2(x) #x
+#define MODVER_STR(x)  MODVER_STR2(x)
+#define MODVER_STRING  MODVER_STR(MODVER_MAJOR) "." MODVER_STR(MODVER_MINOR) "." MODVER_STR(MODVER_PATCH)
+
+1 VERSIONINFO
+FILEVERSION    MODVER_MAJOR,MODVER_MINOR,MODVER_PATCH,0
+PRODUCTVERSION MODVER_MAJOR,MODVER_MINOR,MODVER_PATCH,0
+FILEOS         VOS__WINDOWS32
+FILETYPE       VFT_DLL
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",     "Outpost Universe"
+            VALUE "LegalCopyright",  "Outpost Universe"
+            VALUE "FileDescription", "Outpost 2 Module"
+            VALUE "ProductName",     "Outpost 2"
+            VALUE "FileVersion",     MODVER_STRING
+            VALUE "ProductVersion",  MODVER_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
