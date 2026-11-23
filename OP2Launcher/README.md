@@ -19,6 +19,10 @@ The two only talk through `outpost2.ini`. The exe writes the `[Launcher]` sectio
 reads it at startup. Every launch is one-shot: the module sets `Enabled=0` again once it has fired,
 so the next normal start of OPU is unmodded.
 
+The in-game picker (`op2launcher.exe --picker`), skinned to match OP2's own dialogs:
+
+![The OP2Launcher picker: a list of mission and scenario DLLs, a box to type any DLL name, and LAUNCH / CANCEL buttons](images/picker.png)
+
 ## Quick start
 
 Copy `Launcher.dll` and `op2launcher.exe` into the OPU folder (e.g. `D:\Outpost 2\OPU`), next to

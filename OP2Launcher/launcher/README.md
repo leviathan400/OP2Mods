@@ -87,6 +87,9 @@ The front-end console app `op2launcher.exe` (`../exe/`, cross-platform - Windows
 - [`../exe/build.sh`](../exe/build.sh) - Linux build (`g++`) of `op2launcher`; OPU runs under Wine.
 
 ### Picker skinning (the OP2 look)
+
+![The skinned picker dialog](../images/picker.png)
+
 The picker is a normal Win32 dialog, but it comes out looking like the engine's own "PICK A SCRIPT"
 dialog (navy caption, red-bordered buttons) because we bracket `DialogBoxParam` with OP2's own skin
 engine, **odasl** (the same pattern its SDK uses):
