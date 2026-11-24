@@ -1,0 +1,8 @@
+LIBRARY op2zoom
+EXPORTS
+    InitMod
+    mod_init
+    mod_run
+    mod_destroy
+    DestroyMod
+    RunMod
