@@ -44,7 +44,7 @@ Key engine facts (OPU 1.4.1; same addresses as retail 1.3.6, which is an in-memo
 | in-game frame `Dans_RULE_UIFrame` | `0x005756C0` |
 | `Outpost2.exe` image base (fixed, not ASLR) | `0x00400000` |
 
-(Verified against OP2Internal + the OP2KB-FULL exe and **op2shell** decompiles.) See
+(Verified against OP2Internal and the code of `Outpost2.exe` and **op2shell**.) See
 [`engine.h`](engine.h) for the calls.
 
 > **Gotcha that cost a day:** the picker dialog must NOT call `PostQuitMessage` on close. It runs

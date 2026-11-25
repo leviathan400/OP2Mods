@@ -11,7 +11,7 @@
 // StartGame) but are not on the active code path.
 //
 // Sources (cross-checked): OP2Internal (OP2Internal.asm exports + GameStartInfo.h) and
-// the OP2KB-FULL Outpost2.exe + op2shell decompiles.
+// the code of Outpost2.exe and op2shell.dll themselves.
 #pragma once
 #include <windows.h>
 #include <stdint.h>
