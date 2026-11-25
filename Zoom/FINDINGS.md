@@ -123,12 +123,3 @@ All read `GetClientRect(*(HWND*)(in_ECX+8))` (the viewport pane HWND) then use t
   pick lands off by WIDEN, scale the incoming mouse px by WIDEN.
 - Note: `FUN_00407900` does NOT exist (208-byte gap 0x407880..0x407a50); the realloc-on-zoom helper
   is `FUN_00407880`.
-
-## Screenshots
-The three zoom levels (user-provided) belong in `screenshots/`:
-- `zoom_in.png`  - most magnified (fewest tiles).
-- `zoom_mid.png` - middle level.
-- `zoom_wide.png` - current widest (what the user plays); the new level should show more than this.
-
-(They were pasted into chat; drop the PNG files here - inline images can't be written to disk by
-the tooling.)

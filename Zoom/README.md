@@ -103,16 +103,16 @@ mission**, not just per map size: the mod hooks `Outpost2.exe`'s `LoadLibraryA` 
 re-checks the scale for the new map (re-sizing up or down as needed, also after a map that got
 1.00x) and writes its own `MISSION` / `ZOOM LEVEL` lines, even when the map size is unchanged.
 
-At load it **verifies** the present / `AllocSurface` prologue bytes against the retail reference and
-logs a `MATCH`/`DIFFER` line, plus the live `zoom` global. If **either** differs it installs **no
+At load it **verifies** the present / `AllocSurface` prologue bytes against the expected
+`Outpost2.exe` code and logs a `MATCH`/`DIFFER` line, plus the live `zoom` global. If **either** differs it installs **no
 hooks** and the game runs with vanilla zoom - a wrong build is detected, never corrupted. The
 `BitBlt` hook goes in first and `GetClientRect` only after it, so the over-sized buffer is never
 built without the shrink that undoes it. It also runs a read-only zoom-watcher that logs each zoom
 change.
 
 **Game folder.** Settings are read from, and the log written to, the game's runtime folder: the
-current directory when it holds an `outpost2.ini` (under OPU, OPULauncher starts the game there), else
-the folder of `Outpost2.exe` (retail). Log: `<game folder>\logs\Zoom.log`, with timestamps.
+OPU folder (OPULauncher starts the game with it as the current directory). Log:
+`<game folder>\logs\Zoom.log`, with timestamps.
 With `[Zoom] Debug=0` (default) the log is short: the settings, whether the hooks went in, and
 the `MISSION` / `ZOOM LEVEL` lines for each mission, plus any errors. `Debug=1` adds the
 diagnostics: engine byte checks, `GetClientRect` callers, buffer allocations and re-sizes,
@@ -120,8 +120,8 @@ present/shrink details, scroll repaints and zoom changes.
 
 ## Install
 
-**OPU 1.4.1** (op2ext loads modules from `[ExternalModules]`): copy `Zoom.dll` into the OPU
-folder (next to `OPUPatch.dll`) and add to the OPU folder's `outpost2.ini` (the live one - not the
+Outpost 2 with **OPU 1.4.1** (op2ext loads modules from `[ExternalModules]`): copy `Zoom.dll` into
+the OPU folder (next to `OPUPatch.dll`) and add to the OPU folder's `outpost2.ini` (the live one - not the
 `outpost2.ini` next to the GOG `Outpost2.exe`):
 
 ```ini
@@ -141,22 +141,6 @@ ZoomBigView = 1              ; 1 = lift the engine's 400-byte limit (default), 0
 ZoomStats  = 0               ; 1 = log present statistics every 5 s (diagnostics)
 ```
 
-**Retail 1.3.6 with a newer op2ext** (`[Game] LoadAddons`): copy to `<OP2>\Zoom\Zoom.dll` and add:
-
-```ini
-[Game]
-LoadAddons = "... Zoom"      ; append to the existing list
-WideZoom   = 1
-ZoomWiden  = 2
-[Zoom]
-Dll = "Zoom\Zoom.dll"
-```
-
-**Retail 1.3.6 with the original 2006 op2ext** (no `LoadAddons` support - it loads exactly one mod
-from the command line): copy the DLL as `<OP2>\Zoom\op2mod.dll` and start the game with
-`Outpost2.exe /loadmod Zoom` (e.g. a `Play-Zoom.bat` next to the exe). The `[Game]` keys above still
-apply. op2ext writes `[DEBUG] ART_PATH` into the ini while a mod is loaded.
-
 To use it: start a game and **zoom all the way out** with the **-** button beside the minimap (zoom
 level 1) - the view widens to show more map. Zoom back in (2/3) for vanilla behaviour.
 
@@ -173,17 +157,13 @@ Must be 32-bit - it patches the 32-bit `Outpost2.exe` in-process.
 
 ## Status / notes
 
-- **Working / playable** on retail 1.3.6 (live-tested 2026-11-23, Test 6): ~1.94x more map at a
-  1192x734 window, no crash, smooth frame rate, clean scrolling, sidebar/minimap untouched, mouse
-  correct (drag-select, click, right-click-move).
-- **Working on OPU 1.4.1** (live-tested 2026-11-23, Test 7): GOG install + OPU, maximized
-  2024x1118 window. The GOG `Outpost2.exe` is the same 1997 build (timestamp `34493B6A`) with
-  identical code at every hooked address; loads via `[ExternalModules]` and reads `OPU\outpost2.ini`.
-- **Known issue - selection-box lines (retail):** white selection-box lines can stay on screen while
-  the units they belong to remain selected; they disappear as soon as those units are deselected.
-  They are redrawn by the engine every frame (they survived engine full-background redraws), so
-  screen repaints cannot clear them. Cause not found. **Under OPU they do not linger:** OPUPatch's
-  `[Game] ForceFullRedraw=1` (written by default) redraws the whole view each frame.
+- **Working on OPU 1.4.1** (live-tested from 2026-11-23, Tests 7-13): GOG install + OPU, maximized
+  2024x1118 window; `Outpost2.exe` timestamp `34493B6A`. Loads via `[ExternalModules]` and reads
+  `OPU\outpost2.ini`. Smooth frame rate, clean scrolling, sidebar/minimap untouched, mouse correct
+  (drag-select, click, right-click-move).
+- **Selection-box lines need `ForceFullRedraw=1`:** OPUPatch's `[Game] ForceFullRedraw=1` (written
+  by default) redraws the whole view each frame, so white selection-box lines don't linger. Without a
+  full redraw each frame (early tests) they stayed on screen until those units were deselected.
 - **Cost with `ForceFullRedraw=1`:** every frame presents the whole buffer, so the mod shrinks all of
   it each frame. With the packed-pixel fast path for scales <= 2 (each block is 1 or 2 pixels per
   axis; `(a & b) + (((a ^ b) & M) >> 1)` averages all three channels of two 16bpp pixels at once,
@@ -207,7 +187,7 @@ Must be 32-bit - it patches the 32-bit `Outpost2.exe` in-process.
   world step may feel different; revisit only if needed.
 - Render/UI-only -> **MP-safe** (not a command packet; no simulation state touched).
 
-## Key addresses (retail 1.3.6 / 1.4.1)
+## Key addresses (`Outpost2.exe`, OPU 1.4.1)
 
 | What | Address |
 |---|---|
@@ -229,5 +209,5 @@ Must be 32-bit - it patches the 32-bit `Outpost2.exe` in-process.
 | Tile loop that overruns on a view taller than the map | `MarkAnimatedTilesForRedraw` `0x0046FF80` |
 
 Full reverse-engineering notes and the test-iteration log live alongside this README in this folder:
-`FINDINGS.md` (how the zoom/render/coordinate code works), `PLAN.md` (approach + phases), `TESTLOG.md`
-(the live-test iterations), and `screenshots\`.
+`FINDINGS.md` (how the zoom/render/coordinate code works), `PLAN.md` (approach + phases), and `TESTLOG.md`
+(the live-test iterations).
