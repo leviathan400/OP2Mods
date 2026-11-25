@@ -2,8 +2,12 @@
 
 An **op2ext addon** that adds a **new, wider main-view zoom level** for Outpost 2 - wider than the
 engine's current widest - so the map viewport shows **more map**. Render/UI-only, so it is
-**multiplayer-desync-safe**. Live-tested on retail 1.3.6 (addresses also valid for 1.4.1 - same
-vanilla `Outpost2.exe`).
+**multiplayer-desync-safe**. For OPU 1.4.1.
+
+![Zoomed all the way out at 2x: Colony Builder - Eden, Starship (512x256 map) in a maximized window](../images/zoom_2x.png)
+
+*Zoomed all the way out at **2x** on a maximized window (Colony Builder - Eden, Starship): twice the
+map width and height of the game's normal widest zoom, with the side panels unchanged.*
 
 ## Why it isn't a one-line clamp change
 
