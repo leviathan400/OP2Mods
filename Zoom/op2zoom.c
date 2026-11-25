@@ -1,32 +1,36 @@
-/* Zoom.dll (source op2zoom.c) - op2ext addon for Outpost 2 (OPU 1.4.1).
+/* Zoom.dll (source op2zoom.c) - op2ext module for Outpost 2 with OPU 1.4.1.
  *
- * Goal: a NEW, wider main-view zoom level - wider than the engine's current widest (zoom = 1) - so
- * the viewport shows MORE map. The engine's zoom is an integer DIVISOR: AllocSurface @ 0x004A9170
- * builds the map back-buffer at (clientW/zoom) x (clientH/zoom); present @ 0x004A9410 blits it
- * scaled UP by zoom (StretchDIBits, or BitBlt 1:1 when zoom==1). So zoom = 1 is already the widest
- * the divisor can express. Seeing MORE needs an effective sub-1 scale: a back-buffer LARGER than the
- * window, shrunk on present, with the coordinate math scaled to match. (See FINDINGS.md / PLAN.md.)
+ * Goal: a NEW, wider main-view zoom level - wider than the engine's widest (zoom = 1) - so the map
+ * view shows MORE map. The engine's zoom is an integer DIVISOR: AllocSurface @ 0x004A9170 builds the
+ * map back-buffer at (clientW/zoom) x (clientH/zoom); the present @ 0x004A9410 blits it scaled UP by
+ * zoom (StretchDIBits, or BitBlt 1:1 when zoom == 1). So zoom = 1 is already the widest the divisor
+ * can express. Seeing MORE needs an effective sub-1 scale: a back-buffer LARGER than the window,
+ * shrunk on present, with the screen <-> map maths scaled to match. (See README.md / FINDINGS.md.)
  *
- * HOW (approach 3a, two IAT hooks; engine zoom held at 1):
- *   1. Hook GetClientRect - for the game window, return (client x WIDEN). All size reads funnel
- *      through it, so AllocSurface builds a WIDEN-times-wider buffer AND the coordinate transforms
- *      (view-centre, visible span, scroll) treat the view as wider - consistently, because zoom = 1.
- *   2. Hook BitBlt - at zoom 1 the present is a 1:1 BitBlt of the (now over-sized) map buffer to the
- *      window. When the SOURCE bitmap is wider than the true client, redirect to StretchBlt to shrink
- *      it down to the real window (uniform for full + dirty-rect partial blits).
+ * The wide level is engine zoom level 1 (zoom all the way out), gated on [Game] WideZoom. The scale
+ * ("s16", in 1/16ths: 32 = 2.0x) is the largest step up to [Game] ZoomWiden that the engine and the
+ * loaded map allow (FitScale16). Everything is done with in-memory hooks - Outpost2.exe is not edited:
  *
- * Activation (MVP): zoom level 1 *becomes* the wide level, gated on [Game] WideZoom. The user plays
- * on zoom 3; zooming out to 1 fires the engine's realloc (GetClientRect -> AllocSurface) so the wide
- * buffer is built with no clamp patch / new level / div-by-zero. Both hooks are inert unless
- * WideZoom=1 AND the live zoom global == 1, so normal zoom 2/3 play is untouched.
+ *   1. GetClientRect (IAT)  - lies only to the map code (picked by return address): the back-buffer
+ *      alloc gets (client x scale), so the engine draws a bigger map, and the view transforms get the
+ *      same size, so scrolling / centring / clamping agree with that buffer. Panel layout still sees
+ *      the truth, so the sidebar and minimap don't move. Also re-sizes the view when a mission loads
+ *      a map that needs a different scale (posts WM_SIZE).
+ *   2. BitBlt (IAT)         - the present: when the source is our over-sized buffer, resample it down
+ *      to the window ourselves (FastShrink: one global pixel mapping, box filter, 32bpp copy) and do a
+ *      plain 1:1 BitBlt. Any other bitmap passes through.
+ *   3. ScrollWindowEx (IAT) - the engine scrolls the on-screen picture by buffer pixels (too far on
+ *      the shrunk view); we repaint the whole view from the buffer instead.
+ *   4. Detail::GetAbsolutePos (vtable slot 10) - scales the mouse's client pixel by the scale, so map
+ *      clicks and selection boxes land where the cursor is.
+ *   5. LoadLibraryA (IAT)   - notices each mission DLL load, so every mission re-checks the scale for
+ *      its map and logs MISSION / ZOOM LEVEL.
+ * Plus a subclass of the map window (a 1 s safety repaint and ZoomStats click diagnostics).
  *
- * Later additions (see README.md): ScrollWindowEx hook (full repaint instead of a scroll smear),
- * Detail::GetAbsolutePos hook (mouse scaled to the wide view), own box-filter shrink + 32bpp copy,
- * per-map cap on the scale (small maps), and MISSION / ZOOM LEVEL lines in the log.
+ * Settings (OPU\outpost2.ini): [Game] WideZoom, ZoomWiden, ZoomSmooth, ZoomBlit32, ZoomBigView,
+ * ZoomStats; [Zoom] Debug. Log: OPU\logs\Zoom.log.
  *
- * Toggle: [Game] WideZoom = 1 (on, default) / 0 (off);  [Game] ZoomWiden = 2 (max scale factor).
- *
- * Install (OPU 1.4.1): copy Zoom.dll into the OPU folder and add to OPU\outpost2.ini:
+ * Install: copy Zoom.dll into the OPU folder and add to OPU\outpost2.ini:
  *     [ExternalModules] Zoom = yes
  *     [Zoom] Dll = Zoom.dll
  */
@@ -38,25 +42,27 @@
 #include <tlhelp32.h>
 #pragma intrinsic(_ReturnAddress)
 
-/* Verified retail-1.3.6 addresses (FINDINGS.md). Zoom code is unchanged 1.3.6 -> 1.4.1 per the user. */
+/* Engine addresses in Outpost2.exe (the original 1997 build that OPU 1.4.1 runs; image base 0x00400000,
+ * no ASLR, so these are fixed). How each was found: FINDINGS.md. */
 #define ADDR_PRESENT      0x004A9410u   /* FUN_004a9410 - GDI present (StretchDIBits / BitBlt 1:1)  */
 #define ADDR_ALLOCSURFACE 0x004A9170u   /* FUN_004a9170 - back-buffer factory (CreateDIBSection)    */
 #define ADDR_ZOOM_GLOBAL  0x00576264u   /* int zoom ([Game] Zoom)                                   */
 #define GAMEWND_PTR       0x005756C8u   /* HWND global (same one scrollfix uses)                    */
 
-/* Canonical retail-1.3.6 prologue bytes (from a retail 1.3.6 Outpost2.exe) - sanity-checked at load. */
+/* Expected first 16 bytes of the present and AllocSurface functions. Checked at load (Init): if
+ * either differs, this is not the Outpost2.exe these hooks were written for, and nothing is hooked. */
 static const BYTE REF_PRESENT[16]      = { 0x83,0xEC,0x08,0x53,0x56,0x57,0x8B,0xF1,0x8B,0x7C,0x24,0x18,0x55,0x85,0xFF,0x0F };
 static const BYTE REF_ALLOCSURFACE[16] = { 0x81,0xEC,0x5C,0x04,0x00,0x00,0x89,0x54,0x24,0x00,0x53,0x89,0x4C,0x24,0x08,0x56 };
 
 static HINSTANCE g_hInst;
-static int g_wideZoom = 1;
-static int g_widen    = 2;
+static int g_wideZoom = 1;  /* [Game] WideZoom: 1 = wide level on (default), 0 = mod does nothing        */
+static int g_widen    = 2;  /* [Game] ZoomWiden: maximum scale (2..8); the actual scale may be lower     */
 static int g_smooth   = 1;   /* [Game] ZoomSmooth: 1 = box-filter shrink (thin lines survive), 0 = nearest pixel */
-static volatile LONG g_hooked = 0;   /* 1 once both hooks are installed (verify passed, WideZoom=1) */
+static volatile LONG g_hooked = 0;   /* 1 once the hooks are installed (bytes verified, WideZoom=1)  */
 
 /* Captured TRUE client size of the game window (before we lie about it), used by the present hook. */
 static volatile LONG g_trueW = 0, g_trueH = 0;
-/* The size we told AllocSurface for the detail map's back-buffer (true size x WIDEN). The present
+/* The size we told AllocSurface for the detail map's back-buffer (true size x scale). The present
  * hook only shrinks blits whose SOURCE bitmap is this buffer, so no other wide bitmap (a tileset or
  * sprite sheet, say) can be squashed by mistake. */
 static volatile LONG g_wideW = 0, g_wideH = 0;
@@ -142,22 +148,15 @@ static const char *FindMissionDll(char *name, int cb) {
     return desc;
 }
 
-/* Plain lines for the user, written when a mission is loaded (new mission DLL or map size) and
- * whenever the chosen scale changes (e.g. a window resize):
- *   MISSION: ct01.dll - "<LevelDesc>"
- *   ZOOM LEVEL: 1.06x (max 2.00x) - map WxH tiles, view WxH[, capped by map size]
- * Called from the detail-surface alloc (cat 1) and, when a newly loaded map keeps the current scale
- * so no re-alloc happens, from the view transforms (cat 2). Callers only call it once a map exists
- * (mw > 0): the shell/menu allocs have no map and no mission. s16 = scale in 1/16ths, w x hgt = the
- * true detail view, mw x mh = the usable map size from MapPixelSize. */
+/* Log() is defined further down (after the log-path helpers); LogMapZoom needs it here. */
 static void Log(const char *fmt, ...);
 
 /* Mission (re)load detection. A mission can be exited back to the menu and another (or the same one
  * again) loaded without restarting the exe, and the next map may have the same size - so the map
  * size alone can't tell that a new mission started. LevelDLL::LoadScript (0x00402B20) loads the
  * mission - new games and saved games (LevelDLL::Load) alike - with Outpost2.exe's own LoadLibraryA
- * import; we hook that IAT slot and bump g_missionGen
- * whenever the loaded module is a mission DLL (exports DescBlock + InitProc). The view-transform
+ * import; we hook that IAT slot and bump g_missionGen whenever the loaded module is a mission DLL
+ * (exports DescBlock + InitProc). The view-transform
  * branch of MyGetClientRect sees the new generation, re-checks the scale for the new map and logs
  * MISSION / ZOOM LEVEL for it. Nothing is logged here: the map isn't loaded yet at this point. */
 static volatile LONG g_missionGen = 0;
@@ -170,6 +169,14 @@ static HMODULE WINAPI MyLoadLibraryA(LPCSTR name) {
     return m;
 }
 
+/* Plain lines for the user, written when a mission is loaded (new mission DLL or map size) and
+ * whenever the chosen scale changes (e.g. a window resize):
+ *   MISSION: ct01.dll - "<LevelDesc>"
+ *   ZOOM LEVEL: 1.06x (max 2.00x) - map WxH tiles, view WxH[, capped by map size]
+ * Called from the detail-surface alloc (cat 1) and, when a newly loaded map keeps the current scale
+ * so no re-alloc happens, from the view transforms (cat 2). Callers only call it once a map exists
+ * (mw > 0): the shell/menu allocs have no map and no mission. s16 = scale in 1/16ths, w x hgt = the
+ * true detail view, mw x mh = the usable map size from MapPixelSize. */
 static void LogMapZoom(int s16, int w, int hgt, int mw, int mh) {
     static int lastMw = -1, lastMh = -1, lastS16 = -1;
     static LONG lastGen = -1;
@@ -186,6 +193,7 @@ static void LogMapZoom(int s16, int w, int hgt, int mw, int mh) {
         lastGen = gen;
     }
     if (newMission || mw != lastMw || mh != lastMh || s16 != lastS16) {
+        /* scale as a percentage for the "1.06x" text: 17/16 -> 106 (integer maths, wsprintf has no %f) */
         int z = s16 * 100 / 16, zmax = g_widen * 100;
         int tw = 0, th = 0;
         if (!IsBadReadPtr((void*)ADDR_MAP_TILEW, 4)) tw = *(int*)ADDR_MAP_TILEW;
@@ -223,8 +231,8 @@ static BitBlt_t        g_realBitBlt = NULL;
 /* The game's runtime folder: where the LIVE outpost2.ini is read and logs\ is written.
  * Under OPU, OPULauncher starts the game with the current directory = the OPU folder, while
  * Outpost2.exe itself can sit elsewhere (e.g. an unpatched copy one level up) - so prefer the
- * current directory when it holds an outpost2.ini, and fall back to the exe's folder (retail,
- * where the two are the same). Resolved once, without a trailing backslash. */
+ * current directory when it holds an outpost2.ini, and fall back to the exe's folder. Resolved once,
+ * without a trailing backslash. */
 static char g_gameDir[MAX_PATH];
 static const char *GameDir(void) {
     if (!g_gameDir[0]) {
@@ -242,7 +250,8 @@ static const char *GameDir(void) {
     return g_gameDir;
 }
 
-/* Build "<game dir>\logs\Zoom.log", creating the logs folder if needed. */
+/* Build "<game dir>\logs\Zoom.log", creating the logs folder if needed. (cb is unused: MAX_PATH
+ * buffers are always passed.) */
 static void LogPath(char *out, int cb) {
     const char *dir = GameDir();
     { char logdir[MAX_PATH]; wsprintfA(logdir, "%s\\logs", dir); CreateDirectoryA(logdir, NULL); }
@@ -278,15 +287,16 @@ static void LogV(const char *fmt, va_list ap) {
     }
 }
 
-/* Log the bytes at `va` and compare them with the retail reference. Returns 1 on a match. */
+/* Compare the n bytes at `va` with the expected bytes `ref` and log them (a mismatch is always
+ * logged, a match only with Debug=1). Returns 1 on a match. */
 static int VerifyBytes(const char *label, DWORD va, const BYTE *ref, int n) {
     BYTE *p = (BYTE*)va; char hex[3*32+1]; int i, o = 0, match;
     if (n > 32) n = 32;
     if (IsBadReadPtr(p, n)) { Log("%s @ 0x%08X: UNREADABLE", label, va); return 0; }
     for (i = 0; i < n; i++) o += wsprintfA(hex + o, "%02X ", p[i]);
     match = (memcmp(p, ref, n) == 0);
-    if (match) LogD("%s @ 0x%08X: %s [MATCH retail]", label, va, hex);
-    else       Log("%s @ 0x%08X: %s [DIFFER from retail]", label, va, hex);
+    if (match) LogD("%s @ 0x%08X: %s [MATCH]", label, va, hex);
+    else       Log("%s @ 0x%08X: %s [DIFFER from expected]", label, va, hex);
     return match;
 }
 
@@ -297,7 +307,7 @@ static int WideActive(void) {
     return *(volatile int*)ADDR_ZOOM_GLOBAL == 1;
 }
 
-/* Which GetClientRect callers belong to the MAP subsystem (and must see a WIDEN-ed rect). Scoped by
+/* Which GetClientRect callers belong to the MAP subsystem (and must see a widened rect). Scoped by
  * return-address range so panel-layout (FUN_004999a0 @ 0x4999a0, reads the MAIN window) stays truthful.
  *   1 = ALLOC  (FUN_0049d030 -> AllocSurface 0x4A9170: sizes the map back-buffer)
  *   2 = TRANSFORM (FUN_00407990 clamp, FUN_00408210 centre, FUN_004082f0/00408370/00408540 view math) */
@@ -319,8 +329,10 @@ static void NoteCaller(DWORD ret, HWND h, HWND gw, int w, int hgt, int cat) {
         cat ? (cat == 1 ? "[WIDEN:alloc]" : "[WIDEN:transform]") : "(truthful)");
 }
 
-/* Hook 1: widen the client rect (x WIDEN) ONLY for the map callers, so the map renders more world
- * while panel layout (a different caller/window) stays truthful and panels keep their place. */
+/* Hook 1 (GetClientRect): widen the client rect by the current scale ONLY for the map callers, so
+ * the map renders more world while panel layout (a different caller/window) stays truthful and the
+ * panels keep their place. Category 1 also picks the scale and records the buffer size; category 2
+ * also notices a newly loaded map / mission and re-sizes the view if the scale must change. */
 static BOOL WINAPI MyGetClientRect(HWND h, LPRECT r) {
     BOOL ok = g_realGCR(h, r);
     if (ok && r && WideActive()) {
@@ -343,8 +355,8 @@ static BOOL WINAPI MyGetClientRect(HWND h, LPRECT r) {
                     LogD("alloc #%d: view %dx%d, map %dx%d px -> x%d/16", nAlloc, w, hgt, mw, mh, s16); }
                 if (mw > 0) LogMapZoom(s16, w, hgt, mw, mh);
             }
-            g_trueW = w; g_trueH = hgt;                     /* detail size = present shrink-target fallback */
-            if (s16 > 16) {
+            g_trueW = w; g_trueH = hgt;                     /* true view size: shrink target, re-check input */
+            if (s16 > 16) {                                 /* widen: hand AllocSurface the bigger size */
                 LONG ww = MulDiv(w, s16, 16), wh = MulDiv(hgt, s16, 16);
                 if (s16 != g_scale16 || ww != g_wideW)
                     LogD("wide buffer: %dx%d -> %ldx%ld (x%d/16 = %d.%02dx%s)", w, hgt, ww, wh, s16,
@@ -355,7 +367,7 @@ static BOOL WINAPI MyGetClientRect(HWND h, LPRECT r) {
                 g_scale16 = s16;
                 r->right  = r->left + ww;
                 r->bottom = r->top  + wh;
-            } else {
+            } else {                                        /* 1.00x: leave the rect and the present alone */
                 if (g_scale16 != 0 || g_wideW != 0)
                     LogD("wide buffer: %dx%d is too large to widen at all (engine tile bit vectors) - vanilla", w, hgt);
                 g_wideW = g_wideH = 0;
@@ -411,12 +423,18 @@ static BOOL WINAPI MyGetClientRect(HWND h, LPRECT r) {
  * the message lParam untouched. */
 #define ADDR_DETAIL_GETABSPOS 0x00408070u
 #define ADDR_DETAIL_VT_SLOT10 0x004CF5E8u   /* IWnd::Pane::Detail vtable (0x004CF5C0) + 10*4 */
+/* GetAbsolutePos is a __thiscall member (this = the pane in ECX). C has no __thiscall for free
+ * functions, so we use __fastcall, which passes the first two arguments in ECX and EDX: ECX = pane,
+ * EDX = unused filler, and the rest go on the stack exactly as __thiscall would put them (callee
+ * cleans the stack in both). out = the engine's map-position result. */
 typedef int (__fastcall *GetAbsPos_t)(void *pane, void *edxUnused, int px, int py, void *out);
 static int __fastcall MyGetAbsolutePos(void *pane, void *edxUnused, int px, int py, void *out) {
     LONG s16 = g_scale16;
     if (s16 > 16 && WideActive()) { px = MulDiv(px, s16, 16); py = MulDiv(py, s16, 16); }
     return ((GetAbsPos_t)ADDR_DETAIL_GETABSPOS)(pane, edxUnused, px, py, out);
 }
+/* Swap vtable slot 10 for MyGetAbsolutePos - only if it still holds the original function (anything
+ * else means another mod or a different exe got there first, so leave it alone). Returns 1 on success. */
 static int HookDetailMouse(void) {
     DWORD *slot = (DWORD*)ADDR_DETAIL_VT_SLOT10, op;
     if (IsBadReadPtr(slot, 4) || *slot != ADDR_DETAIL_GETABSPOS) {
@@ -430,18 +448,21 @@ static int HookDetailMouse(void) {
     return 1;
 }
 
+/* The map ("detail") window, subclassed on the first wide present (see MyBitBlt). */
 static HWND   g_detailWnd = NULL;
-static WNDPROC g_origProc = NULL;
+static WNDPROC g_origProc = NULL;            /* its original window procedure */
 static volatile LONG g_subclassed = 0;
 #define ZOOM_TIMER_ID 0x5A4D        /* our refresh timer on the detail window ('ZM') */
 static void OnRefreshTimer(HWND hw);
-static int g_stats;   /* [Game] ZoomStats (defined with the statistics below) */
+static int g_stats;   /* [Game] ZoomStats - used by MyDetailProc; defined with the statistics below */
 /* Diagnostics (ZoomStats=1): one log line per left-button down/up on the map - the raw and scaled
  * lParam, where Windows says the cursor is (GetCursorPos -> ScreenToClient), the window's true client
  * size, the game's resulting map mouse position (0x0057B7B4/B8) and the view origin, so a mouse/
  * picture coordinate mismatch can be measured instead of guessed. */
 #define ADDR_MAP_MOUSE_X   0x0057B7B4u
 #define ADDR_DETAIL_SURFACE 0x005758C8u   /* gameFrame + 0x1F4 (detailPane) + 0x14 (surface) */
+/* In that surface object, +0x110 is its Viewport and Viewport +0x830/+0x834 the view origin (map
+ * pixel of the view's top-left corner). Only read for the click log. */
 static void LogClick(HWND hw, UINT msg, LPARAM rawLp, LPARAM newLp) {
     POINT cp; RECT rc; int vx = -1, vy = -1;
     BYTE *surface;
@@ -485,11 +506,7 @@ static int IsWideMapBuffer(const BITMAP *bm) {
            bm->bmHeight >= wh - WIDE_BUF_SLACK && bm->bmHeight <= wh + WIDE_BUF_SLACK;
 }
 
-/* Hook 2: at zoom 1 the present is a 1:1 BitBlt of the map buffer. When the source bitmap is OUR
- * over-sized detail buffer (exactly the size the alloc hook handed out) and wider than its destination
- * window, shrink it to fit via StretchBlt. Targets the destination window's true client (WindowFromDC),
- * falling back to the alloc-captured detail size. Scale is derived from bitmap-vs-target dims, so full
- * and partial (dirty-rect) blits both map. Any other bitmap passes through untouched. */
+/* One-shot flags so each present-path message is logged once (Debug=1). */
 static volatile LONG g_blitLogged = 0, g_skipLogged = 0;
 
 /* Present statistics while wide-active, logged every STATS_MS when [Game] ZoomStats=1 (off by
@@ -662,7 +679,7 @@ static int DetectTopDown(HDC hs, const DIBSECTION *ds) {
     if (votesTop + votesBottom == 0) {
         /* Undecided (GetPixel never matched either row). Don't retry: the scan + GetPixel is far too
          * slow to repeat on every present. Assume top-down - what the engine's buffer was observed to
-         * be in live testing (retail 1.3.6) - and decide once for this buffer. */
+         * be in live testing - and decide once for this buffer. */
         g_orientBits = bits; g_orientTopDown = 1;
         LogD("present: wide buffer row order undecided from pixels - assuming top-down (biHeight=%ld)",
             ds->dsBmih.biHeight);
@@ -678,7 +695,11 @@ static int DetectTopDown(HDC hs, const DIBSECTION *ds) {
 static int CeilMap(int p, int t, int b) { return (int)(((__int64)p * t + b - 1) / b); }
 
 /* Present one dirty rect of the wide buffer (source bitmap `ob`, selected in hs) to window DC hd.
- * Returns 1 if handled, 0 to fall back to StretchBlt. */
+ * x,y,w,h = the rect in destination coordinates as the engine asked (buffer-sized), sx,sy = its
+ * top-left in the buffer, tw x th = the true window size to shrink to. Converts the rect to the
+ * small pixels it covers (X0..X1, Y0..Y1), fills those from the buffer with one of three
+ * resamplers, then BitBlts just that part of the small DIB. Returns 1 if handled (or nothing to
+ * draw), 0 to fall back to StretchBlt. */
 static int FastShrink(HDC hd, int x, int y, int w, int h, HDC hs, HGDIOBJ ob, int sx, int sy, int tw, int th) {
     DIBSECTION ds; const BYTE *src; int sStride, bw, bh, topDown, bpp, Bpp, got;
     int X0, X1, Y0, Y1, X, Y, offX, offY, to32;
@@ -702,6 +723,7 @@ static int FastShrink(HDC hd, int x, int y, int w, int h, HDC hs, HGDIOBJ ob, in
         RGBQUAD pal[256]; UINT n = GetDIBColorTable(hs, 0, 256, pal);
         if (n) SetDIBColorTable(g_smallDC, 0, n, pal);
     }
+    /* clip the source rect to the buffer, then find the small pixels it maps to */
     if (sx < 0) { w += sx; x -= sx; sx = 0; }
     if (sy < 0) { h += sy; y -= sy; sy = 0; }
     if (sx + w > bw) w = bw - sx;
@@ -768,6 +790,8 @@ static int FastShrink(HDC hd, int x, int y, int w, int h, HDC hs, HGDIOBJ ob, in
             #undef AVG2
             goto present;
         }
+        /* General box filter (scale above 2x): sum each channel over the block, divide by the pixel
+         * count. Blocks are at most 9x9 source pixels at x8, so rows[] and recip[] are big enough. */
         if (!recip[1]) { int i; for (i = 1; i <= 128; i++) recip[i] = 65536u / (unsigned)i; }
         for (Y = Y0; Y < Y1; Y++) {
             int y0 = g_ymap[Y], y1 = g_ymap[Y + 1], ny, k;
@@ -803,6 +827,8 @@ static int FastShrink(HDC hd, int x, int y, int w, int h, HDC hs, HGDIOBJ ob, in
         }
         goto present;
     }
+    /* Nearest pixel (ZoomSmooth=0, or a non-16bpp buffer): copy the top-left source pixel of each
+     * block; cheapest, but 1 px lines on skipped rows/columns disappear. */
     for (Y = Y0; Y < Y1; Y++) {
         int syy = g_ymap[Y];
         const BYTE *srow = src + (size_t)(topDown ? syy : (bh - 1 - syy)) * sStride;
@@ -819,6 +845,7 @@ static int FastShrink(HDC hd, int x, int y, int w, int h, HDC hs, HGDIOBJ ob, in
         }
     }
 present:
+    /* copy just the refreshed part of the small DIB to the window (timed for ZoomStats) */
     offX = MulDiv(x - sx, tw, bw); offY = MulDiv(y - sy, th, bh);  /* usually 0: window coords = buffer coords */
     {
         LARGE_INTEGER b0, b1;
@@ -836,7 +863,8 @@ present:
 #define TIMER_MS 250                /* refresh timer tick on the detail window */
 static DWORD g_lastFullRefresh = 0;
 
-/* Last wide-buffer present: the engine's memory DC + bitmap and the window it went to. */
+/* Last wide-buffer present: the engine's memory DC + bitmap and the window it went to - what
+ * RepaintAll redraws from (the scroll hook and the timer have no source of their own). */
 static HDC     g_lastSrcDC = NULL;
 static HGDIOBJ g_lastSrcBmp = NULL;
 static HWND    g_lastDestWnd = NULL;
@@ -850,7 +878,6 @@ static HWND    g_lastDestWnd = NULL;
 typedef int (WINAPI *ScrollWindowEx_t)(HWND, int, int, const RECT*, const RECT*, HRGN, LPRECT, UINT);
 static ScrollWindowEx_t g_realScrollWindowEx = NULL;
 static volatile LONG g_scrollLogged = 0;
-static int FastShrink(HDC hd, int x, int y, int w, int h, HDC hs, HGDIOBJ ob, int sx, int sy, int tw, int th);
 
 /* Repaint the whole detail view from the wide buffer (as of the last present) through the global
  * mapping. Returns 1 if done. Used by the scroll hook and the refresh timer. */
@@ -880,11 +907,10 @@ static int WINAPI MyScrollWindowEx(HWND hw, int dx, int dy, const RECT *scroll, 
 }
 
 /* Timer (WM_TIMER on the detail window: the game's UI thread, BETWEEN frames, so the buffer is
- * complete - and it fires even in a still scene where nothing else presents).
- * Known issue it does NOT fix: white selection-box lines can stay on screen while the units they
- * belong to remain selected; they are redrawn by the engine every frame (they survived engine
- * full-background redraws and full presents in testing) and vanish as soon as the units are
- * deselected. Not resolved - see TESTLOG.md, Test 6. */
+ * complete - and it fires even in a still scene where nothing else presents). Every REFRESH_MS it
+ * repaints the whole view from the buffer, a safety net for anything left stale on screen.
+ * Lingering white selection-box lines are NOT this timer's job: OPU's [Game] ForceFullRedraw=1
+ * (its default) redraws the whole view each frame, which clears them (TESTLOG.md Tests 6 and 7). */
 static void OnRefreshTimer(HWND hw) {
     DWORD now = GetTickCount();
     if (!(WideActive() && g_scale16 > 16)) return;
@@ -895,6 +921,13 @@ static void OnRefreshTimer(HWND hw) {
     }
 }
 
+/* Hook 2 (BitBlt): at zoom 1 the present is a 1:1 BitBlt of each dirty rect of the map buffer to the
+ * map window. When the source bitmap is OUR over-sized buffer (the size the alloc hook handed out,
+ * IsWideMapBuffer) and wider than its target, shrink that rect to the window: FastShrink normally,
+ * StretchBlt as a fallback (unusual format, non-SRCCOPY, or no window). The target is the destination
+ * window's true client size (WindowFromDC), else the view size recorded at alloc. The scale comes
+ * from buffer-vs-target size, so full and partial blits map the same way. Any other bitmap - and
+ * everything when the wide level is off - goes straight to the real BitBlt. */
 static BOOL WINAPI MyBitBlt(HDC hd,int x,int y,int w,int h,HDC hs,int sx,int sy,DWORD rop) {
     if (WideActive() && hs) {
         g_st.blits++;
@@ -915,13 +948,15 @@ static BOOL WINAPI MyBitBlt(HDC hd,int x,int y,int w,int h,HDC hs,int sx,int sy,
                     LogD("present: left a %dx%d blit unscaled (not the %ldx%ld map buffer)",
                         bm.bmWidth, bm.bmHeight, g_wideW, g_wideH);
             } else if (tw > 0 && bm.bmWidth > tw) {   /* our over-sized map buffer -> shrink to fit */
-                /* first time we identify the detail window, subclass it to scale mouse coords */
+                /* first time we identify the map window: subclass it for the safety-repaint timer and
+                 * the ZoomStats click diagnostics (mouse scaling itself is MyGetAbsolutePos) */
                 if (dw && InterlockedCompareExchange(&g_subclassed, 1, 0) == 0) {
                     g_detailWnd = dw;
                     g_origProc = (WNDPROC)(LONG_PTR)SetWindowLongPtrA(dw, GWLP_WNDPROC, (LONG_PTR)MyDetailProc);
                     SetTimer(dw, ZOOM_TIMER_ID, TIMER_MS, NULL);
-                    LogD("subclassed detail window 0x%08X for mouse scaling (xWIDEN) + refresh timer", (DWORD)(DWORD_PTR)dw);
+                    LogD("subclassed detail window 0x%08X (refresh timer + click diagnostics)", (DWORD)(DWORD_PTR)dw);
                 }
+                /* destination rect scaled down, for the StretchBlt fallback */
                 int dx = MulDiv(x, tw, bm.bmWidth), dy = MulDiv(y, th, bm.bmHeight);
                 int dw2 = MulDiv(w, tw, bm.bmWidth), dh2 = MulDiv(h, th, bm.bmHeight);
                 if (InterlockedExchange(&g_blitLogged, 1) == 0)
@@ -954,7 +989,11 @@ static BOOL WINAPI MyBitBlt(HDC hd,int x,int y,int w,int h,HDC hs,int sx,int sy,
     return g_realBitBlt(hd, x, y, w, h, hs, sx, sy, rop);
 }
 
-/* Patch one IAT slot of Outpost2.exe (match by import name, fall back to current address). */
+/* Patch one import (IAT) slot of Outpost2.exe so its calls to dll!fn go to `repl`; the previous
+ * target is returned in *orig, so the hook can call through (and chains after any hook another
+ * module - e.g. OPUPatch - already put there). The slot is found by import name, or failing that by
+ * its current address. Only Outpost2.exe's own calls are affected, not other DLLs'. Returns 1 if
+ * patched. */
 static int HookIAT(const char *dll, const char *fn, void *repl, void **orig) {
     BYTE *base = (BYTE*)GetModuleHandleA(NULL);
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)base;
@@ -1045,7 +1084,8 @@ static void ReadIni(void) {
         g_wideZoom, g_widen, g_smooth, g_blit32, g_bigView, g_stats, g_debug, path);
 }
 
-/* Watch the engine zoom global and log every transition (read-only poll). */
+/* Watch the engine zoom global and log every transition (read-only poll every 150 ms; Debug=1 only
+ * writes anything). Runs until the DLL unloads. */
 static volatile LONG g_stopPoll = 0;
 static DWORD WINAPI ZoomPollThread(LPVOID arg) {
     int last = -999;
@@ -1078,7 +1118,7 @@ static void Init(void) {
         if (!g_wideZoom)
             Log("WideZoom=0 -> hooks not installed (vanilla zoom).");
         else if (!okPresent || !okAlloc)
-            Log("ABORT: renderer bytes differ from retail 1.3.6 / OPU 1.4.1 - unknown Outpost2.exe, "
+            Log("ABORT: renderer bytes differ from the expected Outpost2.exe (OPU 1.4.1) - unknown exe, "
                 "hooks NOT installed (vanilla zoom).");
         else if (InstallHooks())
             g_hooked = 1;
@@ -1088,7 +1128,10 @@ static void Init(void) {
                : "loaded, but wide zoom is OFF (see above) - vanilla zoom only.");
 }
 
-/* ---- op2ext module entry points ---- */
+/* ---- op2ext module entry points ----
+ * Different op2ext versions call different exports (InitMod / mod_init to start, the others on each
+ * frame or at exit), so all of them exist; Init runs once whichever is called first. Nothing is
+ * needed per frame or at shutdown - hooks stay until the process exits. */
 __declspec(dllexport) void InitMod(void)     { Init(); }
 __declspec(dllexport) void mod_init(void)    { Init(); }
 __declspec(dllexport) void mod_run(void)     { }
@@ -1100,10 +1143,10 @@ static volatile LONG g_detached = 0;
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r) {
     (void)r;
     if (reason == DLL_PROCESS_ATTACH) {
-        g_hInst = h; DisableThreadLibraryCalls(h);
-        LogD("=== process attach - Outpost2 loaded Zoom.dll ===");
+        g_hInst = h; DisableThreadLibraryCalls(h);   /* no per-thread attach/detach calls needed */
+        /* (nothing logged here: the ini - and with it [Zoom] Debug - is only read in Init) */
     } else if (reason == DLL_PROCESS_DETACH) {
-        g_stopPoll = 1;
+        g_stopPoll = 1;                              /* end ZoomPollThread */
         if (InterlockedExchange(&g_detached, 1) == 0)
             LogD("=== process detach - Zoom.dll unloading (game exit) ===");
     }
