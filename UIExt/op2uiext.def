@@ -1,0 +1,8 @@
+LIBRARY UIExt
+EXPORTS
+    InitMod
+    mod_init
+    mod_run
+    mod_destroy
+    DestroyMod
+    RunMod

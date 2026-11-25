@@ -1,7 +1,7 @@
 # Builds every mod on each push / pull request, so a broken build shows up here before anyone
 # downloads the repo. The built files are kept as downloadable artifacts on each run.
 #
-#   windows: Launcher.dll + op2launcher.exe (OP2Launcher) and Zoom.dll, with MSVC x86
+#   windows: Launcher.dll + op2launcher.exe (OP2Launcher), Zoom.dll and UIExt.dll, with MSVC x86
 #            through each mod's own build.bat (they find Visual Studio with vswhere).
 #   linux:   the Linux op2launcher front-end (OP2Launcher/exe/build.sh, g++).
 #
@@ -42,11 +42,17 @@ jobs:
           call Zoom\build.bat
           if errorlevel 1 exit /b 1
 
+      - name: Build UIExt.dll
+        shell: cmd
+        run: |
+          call UIExt\build.bat
+          if errorlevel 1 exit /b 1
+
       # Outpost2.exe is 32-bit, so the DLLs it loads must be too (PE machine type 0x14C).
       - name: Check the builds are 32-bit
         shell: pwsh
         run: |
-          $files = 'OP2Launcher/launcher/Launcher.dll', 'OP2Launcher/exe/op2launcher.exe', 'Zoom/Zoom.dll'
+          $files = 'OP2Launcher/launcher/Launcher.dll', 'OP2Launcher/exe/op2launcher.exe', 'Zoom/Zoom.dll', 'UIExt/UIExt.dll'
           $bad = 0
           foreach ($f in $files) {
             $b = [IO.File]::ReadAllBytes($f)
@@ -66,6 +72,7 @@ jobs:
             OP2Launcher/exe/op2launcher.exe
             OP2Launcher/exe/op2launcher.ini
             Zoom/Zoom.dll
+            UIExt/UIExt.dll
           if-no-files-found: error
 
   linux:
