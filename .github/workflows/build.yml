@@ -1,0 +1,86 @@
+# Builds every mod on each push / pull request, so a broken build shows up here before anyone
+# downloads the repo. The built files are kept as downloadable artifacts on each run.
+#
+#   windows: Launcher.dll + op2launcher.exe (OP2Launcher) and Zoom.dll, with MSVC x86
+#            through each mod's own build.bat (they find Visual Studio with vswhere).
+#   linux:   the Linux op2launcher front-end (OP2Launcher/exe/build.sh, g++).
+#
+# CI can only prove the mods compile; behaviour in the game still needs testing in Outpost 2.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows (MSVC x86)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Launcher.dll
+        shell: cmd
+        run: |
+          call OP2Launcher\launcher\build.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Build op2launcher.exe
+        shell: cmd
+        run: |
+          call OP2Launcher\exe\build.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Build Zoom.dll
+        shell: cmd
+        run: |
+          call Zoom\build.bat
+          if errorlevel 1 exit /b 1
+
+      # Outpost2.exe is 32-bit, so the DLLs it loads must be too (PE machine type 0x14C).
+      - name: Check the builds are 32-bit
+        shell: pwsh
+        run: |
+          $files = 'OP2Launcher/launcher/Launcher.dll', 'OP2Launcher/exe/op2launcher.exe', 'Zoom/Zoom.dll'
+          $bad = 0
+          foreach ($f in $files) {
+            $b = [IO.File]::ReadAllBytes($f)
+            $pe = [BitConverter]::ToInt32($b, 0x3C)
+            $machine = [BitConverter]::ToUInt16($b, $pe + 4)
+            $ok = $machine -eq 0x14C
+            if (-not $ok) { $bad++ }
+            '{0}: machine 0x{1:X4} {2} ({3:N0} bytes)' -f $f, $machine, $(if ($ok) { 'x86 OK' } else { 'NOT x86' }), $b.Length
+          }
+          if ($bad) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OP2Mods-windows
+          path: |
+            OP2Launcher/launcher/Launcher.dll
+            OP2Launcher/exe/op2launcher.exe
+            OP2Launcher/exe/op2launcher.ini
+            Zoom/Zoom.dll
+          if-no-files-found: error
+
+  linux:
+    name: Linux (op2launcher)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build op2launcher
+        run: sh OP2Launcher/exe/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: op2launcher-linux
+          path: |
+            OP2Launcher/exe/op2launcher
+            OP2Launcher/exe/op2launcher.ini
+          if-no-files-found: error
