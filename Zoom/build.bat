@@ -1,5 +1,5 @@
 @echo off
-REM Build op2zoom.dll - must be 32-bit (it patches the 32-bit Outpost2.exe in-process).
+REM Build Zoom.dll - must be 32-bit (it patches the 32-bit Outpost2.exe in-process).
 setlocal
 cd /d "%~dp0"
 
@@ -15,7 +15,7 @@ if errorlevel 1 ( echo vcvarsall x86 failed & exit /b 1 )
 
 rc /nologo /fo modver.res ..\modver.rc
 if errorlevel 1 (echo RC FAILED & exit /b 1)
-cl /nologo /O2 /MT /LD /W3 op2zoom.c /Fe:op2zoom.dll ^
+cl /nologo /O2 /MT /LD /W3 op2zoom.c /Fe:Zoom.dll ^
    /link /DEF:op2zoom.def modver.res user32.lib kernel32.lib gdi32.lib
 if errorlevel 1 ( echo ---BUILD FAILED--- & exit /b 1 )
 echo ---BUILD OK---

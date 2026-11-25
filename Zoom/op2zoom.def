@@ -1,4 +1,4 @@
-LIBRARY op2zoom
+LIBRARY Zoom
 EXPORTS
     InitMod
     mod_init

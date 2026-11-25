@@ -1,4 +1,4 @@
-# Zoom (op2zoom)
+# Zoom (Zoom.dll)
 
 An **op2ext addon** that adds a **new, wider main-view zoom level** for Outpost 2 - wider than the
 engine's current widest - so the map viewport shows **more map**. Render/UI-only, so it is
@@ -49,13 +49,55 @@ the way out to level 1. Five in-memory, reversible hooks and patches (no `Outpos
 5. **Detail-window subclass** - a 250 ms timer that repaints the whole view from the buffer once a
    second (a safety net for stale screen pixels), and the `ZoomStats` click diagnostics.
 
-**Scale limit (crash fix).** `Viewport::SetSurface` (`0x0046F160`) sizes five per-tile redraw bit
-vectors from the surface size, but each is a fixed `bitVectorBuf[400]` inside the `Viewport`. A
-bigger surface overruns them into the pointers after them and crashes at `0x0046F26C` (e.g. a
-~990x700 view at exactly 2x needs 414 bytes). The mod uses the engine's own formula to pick the
-largest scale up to `ZoomWiden`, in 1/16 steps, that fits - e.g. **x31/16 (1.94x)** for a 992x704
-view - and logs `wide buffer: WxH -> W'xH' (x../16, reduced to fit ...)`. If even a small widen does
-not fit, that size stays vanilla.
+**The 400-byte limit.** `Viewport::SetSurface` (`0x0046F160`) sizes five per-tile redraw bit
+vectors from the surface size, but in the vanilla engine each is a fixed `bitVectorBuf[400]` inside
+the `Viewport`. A bigger surface overruns them into the pointers after them and crashes at
+`0x0046F26C` (e.g. a ~990x700 view at exactly 2x needs 414 bytes). `SetSurface` is the only code
+that takes those arrays' addresses (every `lea` in `.text` checked); everything else uses the
+pointers at `+0x804..+0x814`. So the limit can be lifted:
+- **Under OPU 1.4.1** (the supported version): OPUPatch already hooks `SetSurface` (a `jmp` at
+  `0x0046F1D2`, where the redraw vector pointer is stored) and supports larger vectors - its
+  `ForceFullRedraw` also depends on that hook. The mod leaves `SetSurface` to OPU and simply drops its
+  own cap. The only remaining caps are sanity ones (buffer <= 16 Mpx, vectors <= 64 KB), so the full
+  `ZoomWiden` scale is used - e.g. **2x (3648x2176)** for a maximized 1824x1088 view.
+- **Without OPUPatch**, or with `ZoomBigView=0`, the cap stays: the mod picks the largest scale (1/16
+  steps) whose vectors fit 400 bytes, e.g. x19/16 for 1824x1088 or x31/16 for 992x704, logged as
+  `reduced to fit ...`.
+
+**Small maps cap the zoom-out.** The engine assumes the view is smaller than the map, so the scale
+is also limited per map (largest 1/16 step that fits both rules):
+
+- **Height/width inside the map, with a 3-tile margin.** The tile loops (e.g.
+  `MarkAnimatedTilesForRedraw`, `0x0046FF80`) cover `((h + 31) >> 5) + 1` rows and read past the map
+  when the view is taller than it - the tutorial crashed at `+0x7000A` that way. A view just 1-2
+  tiles inside the map still crashed, hence the margin. Map size: tiles at `0x0054F808` (width) and
+  `0x0054F810` (height).
+- **Width under half the map's wrap width** (minus 64 px). Object positions relative to the view
+  are folded modulo the wrap width (pixel mask `0x0054F7FC`) into +/- half of it, so on a view wider
+  than that, objects on the far side are culled - at 1.75x on the tutorial whole structures went
+  missing.
+
+The engine does **not** re-allocate the view when a mission loads, so the buffer would keep the size
+chosen for the previous map (or the menu). When the view transforms see a map whose cap gives a
+different scale, the mod posts a `WM_SIZE` to the detail window, and the engine re-allocates before
+the first present. Result: large maps get the full `ZoomWiden` (2x); the tutorial map (4096 px wrap
+width) gets **x17/16 (~1.06x)** on a maximized 1824x1088 view.
+
+Each mission load logs which mission DLL was loaded and the scale chosen for its map:
+
+```
+MISSION: <mission>.dll - "<LevelDesc>"
+ZOOM LEVEL: <scale> (max <ZoomWiden>) - map <w>x<h> tiles, view <w>x<h>[, capped by map size]
+```
+
+The mission is found as the loaded module exporting `DescBlock` and `InitProc` (every mission DLL
+does); `LevelDesc` is its display name. `ZOOM LEVEL` is written again whenever the scale changes.
+
+Missions can be exited and another loaded without restarting the game, so the check runs **per
+mission**, not just per map size: the mod hooks `Outpost2.exe`'s `LoadLibraryA` import, which
+`LevelDLL::LoadScript` (`0x00402B20`) uses for new and saved games alike. Each mission DLL load
+re-checks the scale for the new map (re-sizing up or down as needed, also after a map that got
+1.00x) and writes its own `MISSION` / `ZOOM LEVEL` lines, even when the map size is unchanged.
 
 At load it **verifies** the present / `AllocSurface` prologue bytes against the retail reference and
 logs a `MATCH`/`DIFFER` line, plus the live `zoom` global. If **either** differs it installs **no
@@ -66,11 +108,15 @@ change.
 
 **Game folder.** Settings are read from, and the log written to, the game's runtime folder: the
 current directory when it holds an `outpost2.ini` (under OPU, OPULauncher starts the game there), else
-the folder of `Outpost2.exe` (retail). Log: `<game folder>\logs\op2zoom.log`, with timestamps.
+the folder of `Outpost2.exe` (retail). Log: `<game folder>\logs\Zoom.log`, with timestamps.
+With `[Zoom] Debug=0` (default) the log is short: the settings, whether the hooks went in, and
+the `MISSION` / `ZOOM LEVEL` lines for each mission, plus any errors. `Debug=1` adds the
+diagnostics: engine byte checks, `GetClientRect` callers, buffer allocations and re-sizes,
+present/shrink details, scroll repaints and zoom changes.
 
 ## Install
 
-**OPU 1.4.1** (op2ext loads modules from `[ExternalModules]`): copy `op2zoom.dll` into the OPU
+**OPU 1.4.1** (op2ext loads modules from `[ExternalModules]`): copy `Zoom.dll` into the OPU
 folder (next to `OPUPatch.dll`) and add to the OPU folder's `outpost2.ini` (the live one - not the
 `outpost2.ini` next to the GOG `Outpost2.exe`):
 
@@ -79,17 +125,19 @@ folder (next to `OPUPatch.dll`) and add to the OPU folder's `outpost2.ini` (the 
 Zoom = yes
 
 [Zoom]
-Dll = op2zoom.dll
+Dll = Zoom.dll
+Debug = 0                    ; 1 = full diagnostic log, 0 = short log (default)
 
 [Game]
 WideZoom   = 1               ; 1 = on (default), 0 = off
 ZoomWiden  = 2               ; max scale 2..8; 2 = ~2x more map (reduced automatically to fit, see above)
 ZoomSmooth = 1               ; 1 = averaged shrink (default), 0 = nearest pixel
 ZoomBlit32 = 1               ; 1 = 32bpp screen copy (default, faster), 0 = 16bpp copy
+ZoomBigView = 1              ; 1 = lift the engine's 400-byte limit (default), 0 = cap the scale to fit it
 ZoomStats  = 0               ; 1 = log present statistics every 5 s (diagnostics)
 ```
 
-**Retail 1.3.6 with a newer op2ext** (`[Game] LoadAddons`): copy to `<OP2>\Zoom\op2zoom.dll` and add:
+**Retail 1.3.6 with a newer op2ext** (`[Game] LoadAddons`): copy to `<OP2>\Zoom\Zoom.dll` and add:
 
 ```ini
 [Game]
@@ -97,7 +145,7 @@ LoadAddons = "... Zoom"      ; append to the existing list
 WideZoom   = 1
 ZoomWiden  = 2
 [Zoom]
-Dll = "Zoom\op2zoom.dll"
+Dll = "Zoom\Zoom.dll"
 ```
 
 **Retail 1.3.6 with the original 2006 op2ext** (no `LoadAddons` support - it loads exactly one mod
@@ -111,7 +159,7 @@ level 1) - the view widens to show more map. Zoom back in (2/3) for vanilla beha
 ## Build
 
 ```
-build.bat        (x86 -> op2zoom.dll)
+build.bat        (x86 -> Zoom.dll; source op2zoom.c)
 ```
 
 `build.bat` finds Visual Studio through `vswhere`: any edition with the C++ x86 tools, including
@@ -143,10 +191,12 @@ Must be 32-bit - it patches the 32-bit `Outpost2.exe` in-process.
   blitted into a 32bpp DIB), so colours are exactly GDI's conversion. The final blit is then a plain
   32->32 copy: ~0.7 ms per Mpx instead of ~2.2; total ~2.0 ms per Mpx instead of ~3.1. In the test the
   game used the time to present ~2.4x more pixels per second. `ZoomBlit32=0` restores the 16bpp copy.
-- **Window size limits the zoom-out:** the engine's 400-byte tile bit vectors cap the scale by view
-  size. A maximized 2024x1118 window (1824x1088 view) only gets **x19/16 (1.19x)**; a ~1192x734
-  window gets 1.94x. Lifting it would mean giving the `Viewport` larger bit vectors (patching
-  `Viewport::SetSurface`).
+- **Full 2x on large windows (Test 11):** with the 400-byte limit lifted, a maximized 2024x1118 window
+  on OPU 1.4.1 runs at **2x** (3648x2176 buffer; was capped at 1.19x) - smooth, no crash, and no
+  lingering selection-box lines (OPU's `ForceFullRedraw`). Shrink cost ~340 ms/s at ~200 Mpx/s
+  presented (~1.7 ms per Mpx).
+- **Small maps (Test 12):** the zoom-out is capped per map (see *How it works*), so small maps such
+  as the tutorial get less of it (~1.06x) - no crash, all structures drawn.
 - **Activation** currently repurposes engine zoom level 1 (the widest). A future version could add a
   true 4th level + hotkey so vanilla zoom 1 stays reachable.
 - **Edge/arrow scroll** uses `GetCursorPos` (not `lParam`), so it works at the wide level though the
@@ -170,6 +220,9 @@ Must be 32-bit - it patches the 32-bit `Outpost2.exe` in-process.
 | Game window HWND global | `0x005756C8` |
 | `Viewport::SetSurface` (sizes the 400-byte tile bit vectors) | `0x0046F160` |
 | `GFXClippedSurface::ScrollScreen` (`ScrollWindowEx`) | `0x004A9890` |
+| Map width / height in tiles | `0x0054F808` / `0x0054F810` |
+| Map x wrap mask in pixels (positions folded to +/- half of it) | `0x0054F7FC` |
+| Tile loop that overruns on a view taller than the map | `MarkAnimatedTilesForRedraw` `0x0046FF80` |
 
 Full reverse-engineering notes and the test-iteration log live alongside this README in this folder:
 `FINDINGS.md` (how the zoom/render/coordinate code works), `PLAN.md` (approach + phases), `TESTLOG.md`

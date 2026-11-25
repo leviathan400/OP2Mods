@@ -3,8 +3,7 @@
 Goal: add a **new, wider zoom level** (the user's "zoom 4") so the main game viewport shows **more
 map** than the current widest level. Delivered as an **op2ext module**.
 
-Source: an annotated decompile of retail 1.3.6 `Outpost2.exe` (decompile +
-annotations). The game the user runs is **OPU 1.4** (GDI renderer) - see the "must verify" note.
+Source: the retail 1.3.6 `Outpost2.exe` code. The game the user runs is **OPU 1.4** (GDI renderer) - see the "must verify" note.
 
 ## The zoom variable
 - The main-view zoom is a single global **`int zoom` at `0x576264`** - the persisted `[Game] Zoom`
@@ -96,8 +95,8 @@ The decompile here is **retail 1.3.6**; the user runs **OPU 1.4**, which "forces
 patches the present from DirectDraw `StretchDIBits` to **`BitBlt`**. The exact OPU present path
 decides how we make a larger-than-window back-buffer shrink to the window. Step 0 of the plan is to
 confirm OPU 1.4's renderer (the `BitBlt`/`StretchBlt` present and whether the back-buffer is
-window-sized or window/zoom there). The retail 1.3.6 decompile is the
-matching retail build; OPU's NetFix/renderer patches live in its addon DLLs.
+window-sized or window/zoom there). Retail 1.3.6 is the
+matching build; OPU's NetFix/renderer patches live in its addon DLLs.
 
 ## Coordinate transforms + present (decompiled bodies, Step 1.5)
 All read `GetClientRect(*(HWND*)(in_ECX+8))` (the viewport pane HWND) then use the zoom global

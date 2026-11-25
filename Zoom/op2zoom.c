@@ -1,4 +1,4 @@
-/* op2zoom.dll - op2ext addon for Outpost 2 (OPU 1.4.1 / retail 1.3.6).
+/* Zoom.dll (source op2zoom.c) - op2ext addon for Outpost 2 (OPU 1.4.1).
  *
  * Goal: a NEW, wider main-view zoom level - wider than the engine's current widest (zoom = 1) - so
  * the viewport shows MORE map. The engine's zoom is an integer DIVISOR: AllocSurface @ 0x004A9170
@@ -20,20 +20,22 @@
  * buffer is built with no clamp patch / new level / div-by-zero. Both hooks are inert unless
  * WideZoom=1 AND the live zoom global == 1, so normal zoom 2/3 play is untouched.
  *
- * OPEN: mouse-to-tile picking may not run through clientRect; if a click lands off by WIDEN we add a
- * mouse-input x WIDEN scaler. Worst case of this build is a mis-rendered view (no crash) - test + iterate.
+ * Later additions (see README.md): ScrollWindowEx hook (full repaint instead of a scroll smear),
+ * Detail::GetAbsolutePos hook (mouse scaled to the wide view), own box-filter shrink + 32bpp copy,
+ * per-map cap on the scale (small maps), and MISSION / ZOOM LEVEL lines in the log.
  *
- * Toggle: [Game] WideZoom = 1 (on, default) / 0 (off);  [Game] ZoomWiden = 2 (scale factor, >=2).
+ * Toggle: [Game] WideZoom = 1 (on, default) / 0 (off);  [Game] ZoomWiden = 2 (max scale factor).
  *
- * Install: copy to <OP2>\Zoom\op2zoom.dll and add to outpost2.ini:
- *     [Game] LoadAddons = "Zoom"          ; (append to any existing list)
- *     [Zoom] Dll = "Zoom\op2zoom.dll"
+ * Install (OPU 1.4.1): copy Zoom.dll into the OPU folder and add to OPU\outpost2.ini:
+ *     [ExternalModules] Zoom = yes
+ *     [Zoom] Dll = Zoom.dll
  */
 #include <windows.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <intrin.h>
+#include <tlhelp32.h>
 #pragma intrinsic(_ReturnAddress)
 
 /* Verified retail-1.3.6 addresses (FINDINGS.md). Zoom code is unchanged 1.3.6 -> 1.4.1 per the user. */
@@ -77,13 +79,139 @@ static int BitVecBytes(int w, int h) {
     return lineBytes * rows;
 }
 
-/* Largest factor (1/16 steps, from ZoomWiden down) whose widened surface still fits the engine's
- * bit vectors. Returns 16 (= 1.0x, no widening) when even a small widen won't fit. */
+/* Under OPU the 400-byte limit is gone: OPUPatch's own hook in SetSurface supports larger vectors
+ * (see InstallHooks). The only caps left are sanity ones: the widened buffer (<= 16 Mpx, 32 MB at
+ * 16bpp) and bit vectors (<= 64 KB each, far beyond any real window). Without OPU the cap stays. */
+static int g_bigVectors = 0;              /* 1 = no 400-byte cap (OPUPatch loaded, ZoomBigView=1) */
+static int g_bigView = 1;                 /* [Game] ZoomBigView: 1 = lift the 400-byte cap (default) */
+#define BIG_BITVEC_MAX   65536
+#define WIDE_PIXELS_MAX  (4096 * 4096)
+
+/* The widened view must not be larger than the map itself: the engine's per-frame tile loops
+ * (e.g. Viewport::MarkAnimatedTilesForRedraw 0x0046FF80, DrawBackground) walk every visible tile
+ * row and read the map cell array without a bound - a view taller than the map reads past it and
+ * crashes (OPU 1.4.1 tutorial map at 2x, Outpost2.exe+0x7000A, Test 12). Map size in tiles: */
+#define ADDR_MAP_TILEW 0x0054F808u
+#define ADDR_MAP_TILEH 0x0054F810u
+#define ADDR_MAP_PXMASK 0x0054F7FCu   /* map x wrap mask in pixels */
+static int g_allocMapW = 0, g_allocMapH = 0;   /* map size (px) the current buffer was sized for */
+static volatile LONG g_resizePosted = 0;       /* a WM_SIZE re-alloc is pending */
+static void MapPixelSize(int *mw, int *mh) {
+    int tw = 0, th = 0;
+    if (!IsBadReadPtr((void*)ADDR_MAP_TILEW, 4)) tw = *(int*)ADDR_MAP_TILEW;
+    if (!IsBadReadPtr((void*)ADDR_MAP_TILEH, 4)) th = *(int*)ADDR_MAP_TILEH;
+    /* Usable size = map minus a 3-tile margin: the tile loops cover ((h + 31) >> 5) + 1 rows (plus an
+     * extra column) from the view's first tile, so a view only just inside the map still reads a
+     * row past it (Test 12: a 2040 px view on a 2048 px map crashed). 0 = no map loaded (shell). */
+    *mw = (tw > 3 && tw <= 1024) ? (tw - 3) * 32 : 0;
+    *mh = (th > 3 && th <= 1024) ? (th - 3) * 32 : 0;
+    /* Width is also limited to HALF the map's wrap width: object positions relative to the view are
+     * computed modulo the map width and folded into -W/2..+W/2 (e.g. DrawMapRectOutline: x & mask,
+     * then "if (x > mask/2) x -= mask"), so anything more than half a map-width right of the view's
+     * left edge counts as off-screen - structures vanished on the right of a 3192 px view on the
+     * 4096 px tutorial map (Test 12). Wrap mask in pixels: DAT_0054F7FC. */
+    if (*mw) {
+        int mask = IsBadReadPtr((void*)ADDR_MAP_PXMASK, 4) ? 0 : *(int*)ADDR_MAP_PXMASK;
+        int half = (mask > 0 && mask < (1 << 20)) ? (mask + 1) / 2 - 64 : 0;   /* 2-tile margin */
+        if (half > 0 && half < *mw) *mw = half;
+    }
+}
+
+/* Find the loaded mission DLL, for the log. The engine LoadLibrary's the mission (e.g. ct01.dll,
+ * c_tutorial.dll) before it builds the map, so by the time a map size shows up the mission module is
+ * in the process. Every mission DLL exports DescBlock (its AIModDesc) and InitProc; game/OPU modules
+ * don't, so the first module exporting both is the mission. LevelDesc (exported char array) is the
+ * mission's display name. Copies the module file name into name (empty when none is loaded) and
+ * returns the LevelDesc text or "". */
+static const char *FindMissionDll(char *name, int cb) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    MODULEENTRY32 me;
+    const char *desc = "";
+    name[0] = 0;
+    if (snap == INVALID_HANDLE_VALUE) return desc;
+    me.dwSize = sizeof(me);
+    if (Module32First(snap, &me)) do {
+        if (GetProcAddress(me.hModule, "DescBlock") && GetProcAddress(me.hModule, "InitProc")) {
+            const char *ld = (const char*)GetProcAddress(me.hModule, "LevelDesc");
+            lstrcpynA(name, me.szModule, cb);
+            if (ld && !IsBadStringPtrA(ld, 128)) desc = ld;
+            break;
+        }
+    } while (Module32Next(snap, &me));
+    CloseHandle(snap);
+    return desc;
+}
+
+/* Plain lines for the user, written when a mission is loaded (new mission DLL or map size) and
+ * whenever the chosen scale changes (e.g. a window resize):
+ *   MISSION: ct01.dll - "<LevelDesc>"
+ *   ZOOM LEVEL: 1.06x (max 2.00x) - map WxH tiles, view WxH[, capped by map size]
+ * Called from the detail-surface alloc (cat 1) and, when a newly loaded map keeps the current scale
+ * so no re-alloc happens, from the view transforms (cat 2). Callers only call it once a map exists
+ * (mw > 0): the shell/menu allocs have no map and no mission. s16 = scale in 1/16ths, w x hgt = the
+ * true detail view, mw x mh = the usable map size from MapPixelSize. */
+static void Log(const char *fmt, ...);
+
+/* Mission (re)load detection. A mission can be exited back to the menu and another (or the same one
+ * again) loaded without restarting the exe, and the next map may have the same size - so the map
+ * size alone can't tell that a new mission started. LevelDLL::LoadScript (0x00402B20) loads the
+ * mission - new games and saved games (LevelDLL::Load) alike - with Outpost2.exe's own LoadLibraryA
+ * import; we hook that IAT slot and bump g_missionGen
+ * whenever the loaded module is a mission DLL (exports DescBlock + InitProc). The view-transform
+ * branch of MyGetClientRect sees the new generation, re-checks the scale for the new map and logs
+ * MISSION / ZOOM LEVEL for it. Nothing is logged here: the map isn't loaded yet at this point. */
+static volatile LONG g_missionGen = 0;
+typedef HMODULE (WINAPI *LoadLibraryA_t)(LPCSTR);
+static LoadLibraryA_t g_realLoadLibraryA = NULL;
+static HMODULE WINAPI MyLoadLibraryA(LPCSTR name) {
+    HMODULE m = g_realLoadLibraryA(name);
+    if (m && GetProcAddress(m, "DescBlock") && GetProcAddress(m, "InitProc"))
+        InterlockedIncrement(&g_missionGen);
+    return m;
+}
+
+static void LogMapZoom(int s16, int w, int hgt, int mw, int mh) {
+    static int lastMw = -1, lastMh = -1, lastS16 = -1;
+    static LONG lastGen = -1;
+    static char lastMission[MAX_PATH] = "";
+    char mission[MAX_PATH];
+    const char *desc = FindMissionDll(mission, sizeof(mission));
+    LONG gen = g_missionGen;
+    int newMission;
+    if (!mission[0]) return;          /* menu / between missions: the map globals may be stale */
+    newMission = gen != lastGen || lstrcmpiA(mission, lastMission) != 0;
+    if (newMission) {
+        Log("MISSION: %s - \"%s\"", mission, desc);
+        lstrcpynA(lastMission, mission, sizeof(lastMission));
+        lastGen = gen;
+    }
+    if (newMission || mw != lastMw || mh != lastMh || s16 != lastS16) {
+        int z = s16 * 100 / 16, zmax = g_widen * 100;
+        int tw = 0, th = 0;
+        if (!IsBadReadPtr((void*)ADDR_MAP_TILEW, 4)) tw = *(int*)ADDR_MAP_TILEW;
+        if (!IsBadReadPtr((void*)ADDR_MAP_TILEH, 4)) th = *(int*)ADDR_MAP_TILEH;
+        Log("ZOOM LEVEL: %d.%02dx (max %d.%02dx) - map %dx%d tiles, view %dx%d%s",
+            z / 100, z % 100, zmax / 100, zmax % 100, tw, th, w, hgt,
+            s16 < g_widen * 16 ? ", capped by map size" : "");
+        lastMw = mw; lastMh = mh; lastS16 = s16;
+    }
+}
+
+/* Largest factor (1/16 steps, from ZoomWiden down) whose widened surface fits: the map, and the
+ * engine's 400-byte bit vectors (or, under OPU, the sanity caps). Returns 16 (= 1.0x) when nothing
+ * fits. */
 static int FitScale16(int w, int h) {
-    int s16;
-    for (s16 = g_widen * 16; s16 > 16; s16--)
-        if (BitVecBytes(MulDiv(w, s16, 16), MulDiv(h, s16, 16)) <= VIEWPORT_BITVEC_BYTES)
+    int s16, mw, mh;
+    MapPixelSize(&mw, &mh);
+    for (s16 = g_widen * 16; s16 > 16; s16--) {
+        int W = MulDiv(w, s16, 16), H = MulDiv(h, s16, 16);
+        if ((mw && W > mw) || (mh && H > mh)) continue;  /* view would be bigger than the map */
+        if (g_bigVectors) {
+            if ((double)W * H <= WIDE_PIXELS_MAX && BitVecBytes(W, H) <= BIG_BITVEC_MAX) return s16;
+        } else if (BitVecBytes(W, H) <= VIEWPORT_BITVEC_BYTES) {
             return s16;
+        }
+    }
     return 16;
 }
 
@@ -114,16 +242,29 @@ static const char *GameDir(void) {
     return g_gameDir;
 }
 
-/* Build "<game dir>\logs\op2zoom.log", creating the logs folder if needed. */
+/* Build "<game dir>\logs\Zoom.log", creating the logs folder if needed. */
 static void LogPath(char *out, int cb) {
     const char *dir = GameDir();
     { char logdir[MAX_PATH]; wsprintfA(logdir, "%s\\logs", dir); CreateDirectoryA(logdir, NULL); }
-    wsprintfA(out, "%s\\logs\\op2zoom.log", dir);
+    wsprintfA(out, "%s\\logs\\Zoom.log", dir);
     (void)cb;
 }
 
-static void Log(const char *fmt, ...) {
-    char buf[512]; va_list ap; va_start(ap, fmt); wvsprintfA(buf, fmt, ap); va_end(ap);
+/* Two log levels, set by [Zoom] Debug in outpost2.ini:
+ *   Log()  - always written: load result, settings, hook failures, MISSION / ZOOM LEVEL per mission,
+ *            errors and warnings, and the ZoomStats lines (which have their own switch).
+ *   LogD() - only with Debug=1: diagnostics - engine byte checks, GetClientRect callers, buffer
+ *            allocations and re-sizes, present/shrink path details, scroll repaints, zoom changes. */
+static int g_debug = 0;
+static void LogV(const char *fmt, va_list ap);
+static void Log(const char *fmt, ...)  { va_list ap; va_start(ap, fmt); LogV(fmt, ap); va_end(ap); }
+static void LogD(const char *fmt, ...) {
+    va_list ap;
+    if (!g_debug) return;
+    va_start(ap, fmt); LogV(fmt, ap); va_end(ap);
+}
+static void LogV(const char *fmt, va_list ap) {
+    char buf[512]; wvsprintfA(buf, fmt, ap);
     SYSTEMTIME t; GetLocalTime(&t);
     char path[MAX_PATH]; LogPath(path, sizeof(path));
     HANDLE h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE,
@@ -144,7 +285,8 @@ static int VerifyBytes(const char *label, DWORD va, const BYTE *ref, int n) {
     if (IsBadReadPtr(p, n)) { Log("%s @ 0x%08X: UNREADABLE", label, va); return 0; }
     for (i = 0; i < n; i++) o += wsprintfA(hex + o, "%02X ", p[i]);
     match = (memcmp(p, ref, n) == 0);
-    Log("%s @ 0x%08X: %s [%s retail]", label, va, hex, match ? "MATCH" : "DIFFER from");
+    if (match) LogD("%s @ 0x%08X: %s [MATCH retail]", label, va, hex);
+    else       Log("%s @ 0x%08X: %s [DIFFER from retail]", label, va, hex);
     return match;
 }
 
@@ -173,7 +315,7 @@ static void NoteCaller(DWORD ret, HWND h, HWND gw, int w, int hgt, int cat) {
     int i, n = g_callerCount;
     for (i = 0; i < n; i++) if (g_callers[i] == ret) return;
     if (n < 64) { g_callers[n] = ret; g_callerCount = n + 1; }
-    Log("GCR caller=0x%08X hwnd=%s size=%dx%d %s", ret, (h == gw) ? "GAME" : "other", w, hgt,
+    LogD("GCR caller=0x%08X hwnd=%s size=%dx%d %s", ret, (h == gw) ? "GAME" : "other", w, hgt,
         cat ? (cat == 1 ? "[WIDEN:alloc]" : "[WIDEN:transform]") : "(truthful)");
 }
 
@@ -192,25 +334,65 @@ static BOOL WINAPI MyGetClientRect(HWND h, LPRECT r) {
          * factor the buffer got, and only once the buffer has been widened. */
         if (cat == 1 && w >= 400) {
             int s16 = FitScale16(w, hgt);
+            {   /* remember the map size this buffer was sized for (the map cap needs a re-alloc when a
+                 * mission loads a different map - see the cat 2 branch) */
+                static int nAlloc = 0; int mw, mh;
+                MapPixelSize(&mw, &mh);
+                g_allocMapW = mw; g_allocMapH = mh; g_resizePosted = 0;
+                if (nAlloc < 20) { nAlloc++;
+                    LogD("alloc #%d: view %dx%d, map %dx%d px -> x%d/16", nAlloc, w, hgt, mw, mh, s16); }
+                if (mw > 0) LogMapZoom(s16, w, hgt, mw, mh);
+            }
             g_trueW = w; g_trueH = hgt;                     /* detail size = present shrink-target fallback */
             if (s16 > 16) {
                 LONG ww = MulDiv(w, s16, 16), wh = MulDiv(hgt, s16, 16);
                 if (s16 != g_scale16 || ww != g_wideW)
-                    Log("wide buffer: %dx%d -> %ldx%ld (x%d/16%s)", w, hgt, ww, wh, s16,
-                        s16 < g_widen * 16 ? ", reduced to fit the engine's 400-byte tile bit vectors" : "");
+                    LogD("wide buffer: %dx%d -> %ldx%ld (x%d/16 = %d.%02dx%s)", w, hgt, ww, wh, s16,
+                        s16 * 100 / 16 / 100, s16 * 100 / 16 % 100,
+                        s16 >= g_widen * 16 ? "" : g_bigVectors ? ", reduced to fit the map (or the 16 Mpx cap)"
+                                                 : ", reduced to fit the map / 400-byte tile bit vectors");
                 g_wideW = ww; g_wideH = wh;                 /* the only buffer the present may shrink */
                 g_scale16 = s16;
                 r->right  = r->left + ww;
                 r->bottom = r->top  + wh;
             } else {
                 if (g_scale16 != 0 || g_wideW != 0)
-                    Log("wide buffer: %dx%d is too large to widen at all (engine tile bit vectors) - vanilla", w, hgt);
+                    LogD("wide buffer: %dx%d is too large to widen at all (engine tile bit vectors) - vanilla", w, hgt);
                 g_wideW = g_wideH = 0;
                 g_scale16 = 0;
             }
-        } else if (cat == 2 && g_scale16 > 16) {
-            r->right  = r->left + MulDiv(w,   g_scale16, 16);
-            r->bottom = r->top  + MulDiv(hgt, g_scale16, 16);
+        } else if (cat == 2 && g_trueW > 0) {
+            /* A mission loaded a different map since the buffer was sized (the engine does NOT
+             * re-allocate the detail surface on mission load - Test 12): if the current scale no
+             * longer fits this map, post WM_SIZE to the detail window. Its handler rebuilds the
+             * surface (back through our cat 1 branch, now map-capped); a posted message is handled
+             * before the game's next idle frame. The view transforms run when a mission centres its
+             * view, i.e. before anything is drawn. */
+            /* Also runs at 1.00x (g_scale16 == 0, a map too small to widen), so a bigger map loaded
+             * next still gets widened, and on every new mission (g_missionGen, see MyLoadLibraryA)
+             * even when the map size didn't change, so each mission gets its own log lines. */
+            static LONG seenGen = 0;
+            int mw, mh;
+            LONG gen = g_missionGen;
+            MapPixelSize(&mw, &mh);
+            if (!g_resizePosted && mw > 0 && (mw != g_allocMapW || mh != g_allocMapH || gen != seenGen)) {
+                int cur = g_scale16 > 16 ? g_scale16 : 16;   /* scale the buffer has now */
+                int s16 = FitScale16(g_trueW, g_trueH);
+                seenGen = gen;
+                if (s16 != cur) {
+                    g_resizePosted = 1;
+                    LogD("map now %dx%d px (buffer sized for %dx%d): x%d/16 -> x%d/16, posting WM_SIZE to re-allocate",
+                        mw, mh, g_allocMapW, g_allocMapH, cur, s16);
+                    PostMessageA(h, WM_SIZE, SIZE_RESTORED, MAKELPARAM(g_trueW, g_trueH));
+                } else {
+                    g_allocMapW = mw; g_allocMapH = mh;      /* still fits - nothing to re-allocate */
+                    LogMapZoom(cur, g_trueW, g_trueH, mw, mh);   /* new map/mission, same scale */
+                }
+            }
+            if (g_scale16 > 16) {                            /* transforms match the widened buffer */
+                r->right  = r->left + MulDiv(w,   g_scale16, 16);
+                r->bottom = r->top  + MulDiv(hgt, g_scale16, 16);
+            }
         }
     }
     return ok;
@@ -401,7 +583,7 @@ static int BuildLut(HDC hd, const DIBSECTION *ds) {
     }
     if (sdc) DeleteDC(sdc); if (ddc) DeleteDC(ddc);
     if (sb) DeleteObject(sb); if (db) DeleteObject(db);
-    Log("present: 16->32bpp lookup table %s (compression=%lu, white 0x7FFF -> %06lX)",
+    LogD("present: 16->32bpp lookup table %s (compression=%lu, white 0x7FFF -> %06lX)",
         ok ? "built by GDI" : "FAILED - using a 16bpp copy", comp, ok ? g_lut[0x7FFF] : 0);
     return ok;
 }
@@ -482,12 +664,12 @@ static int DetectTopDown(HDC hs, const DIBSECTION *ds) {
          * slow to repeat on every present. Assume top-down - what the engine's buffer was observed to
          * be in live testing (retail 1.3.6) - and decide once for this buffer. */
         g_orientBits = bits; g_orientTopDown = 1;
-        Log("present: wide buffer row order undecided from pixels - assuming top-down (biHeight=%ld)",
+        LogD("present: wide buffer row order undecided from pixels - assuming top-down (biHeight=%ld)",
             ds->dsBmih.biHeight);
         return g_orientTopDown;
     }
     g_orientBits = bits; g_orientTopDown = votesTop >= votesBottom;
-    Log("present: wide buffer row order = %s (votes top=%d bottom=%d, biHeight=%ld)",
+    LogD("present: wide buffer row order = %s (votes top=%d bottom=%d, biHeight=%ld)",
         g_orientTopDown ? "top-down" : "bottom-up", votesTop, votesBottom, ds->dsBmih.biHeight);
     return g_orientTopDown;
 }
@@ -504,7 +686,7 @@ static int FastShrink(HDC hd, int x, int y, int w, int h, HDC hs, HGDIOBJ ob, in
     got = GetObjectA(ob, sizeof(ds), &ds);
     bpp = ds.dsBm.bmBitsPixel;
     if (InterlockedExchange(&g_fmtLogged, 1) == 0)
-        Log("present: wide buffer format: GetObject=%d (DIBSECTION=%d) bits=%p bpp=%d compression=%lu "
+        LogD("present: wide buffer format: GetObject=%d (DIBSECTION=%d) bits=%p bpp=%d compression=%lu "
             "biHeight=%ld masks=%08lX/%08lX/%08lX", got, (int)sizeof(ds), ds.dsBm.bmBits, bpp,
             ds.dsBmih.biCompression, ds.dsBmih.biHeight, ds.dsBitfields[0], ds.dsBitfields[1], ds.dsBitfields[2]);
     if (got != sizeof(ds) || !ds.dsBm.bmBits) return 0;                       /* not a DIB section */
@@ -690,7 +872,7 @@ static int WINAPI MyScrollWindowEx(HWND hw, int dx, int dy, const RECT *scroll, 
     if (RepaintAll(hw)) {
         g_st.scrolls++;
         if (InterlockedExchange(&g_scrollLogged, 1) == 0)
-            Log("scroll: ScrollWindowEx(%d,%d) replaced by a full repaint from the wide buffer", dx, dy);
+            LogD("scroll: ScrollWindowEx(%d,%d) replaced by a full repaint from the wide buffer", dx, dy);
         if (upd) SetRectEmpty(upd);
         return SIMPLEREGION;
     }
@@ -730,7 +912,7 @@ static BOOL WINAPI MyBitBlt(HDC hd,int x,int y,int w,int h,HDC hs,int sx,int sy,
             if (tw > 0 && bm.bmWidth > tw && !IsWideMapBuffer(&bm)) {
                 /* wider than its target but NOT our buffer: the old rule would have shrunk this */
                 if (InterlockedExchange(&g_skipLogged, 1) == 0)
-                    Log("present: left a %dx%d blit unscaled (not the %ldx%ld map buffer)",
+                    LogD("present: left a %dx%d blit unscaled (not the %ldx%ld map buffer)",
                         bm.bmWidth, bm.bmHeight, g_wideW, g_wideH);
             } else if (tw > 0 && bm.bmWidth > tw) {   /* our over-sized map buffer -> shrink to fit */
                 /* first time we identify the detail window, subclass it to scale mouse coords */
@@ -738,12 +920,12 @@ static BOOL WINAPI MyBitBlt(HDC hd,int x,int y,int w,int h,HDC hs,int sx,int sy,
                     g_detailWnd = dw;
                     g_origProc = (WNDPROC)(LONG_PTR)SetWindowLongPtrA(dw, GWLP_WNDPROC, (LONG_PTR)MyDetailProc);
                     SetTimer(dw, ZOOM_TIMER_ID, TIMER_MS, NULL);
-                    Log("subclassed detail window 0x%08X for mouse scaling (xWIDEN) + refresh timer", (DWORD)(DWORD_PTR)dw);
+                    LogD("subclassed detail window 0x%08X for mouse scaling (xWIDEN) + refresh timer", (DWORD)(DWORD_PTR)dw);
                 }
                 int dx = MulDiv(x, tw, bm.bmWidth), dy = MulDiv(y, th, bm.bmHeight);
                 int dw2 = MulDiv(w, tw, bm.bmWidth), dh2 = MulDiv(h, th, bm.bmHeight);
                 if (InterlockedExchange(&g_blitLogged, 1) == 0)
-                    Log("present shrink: buf=%dx%d -> %dx%d (via %s)", bm.bmWidth, bm.bmHeight, tw, th, via);
+                    LogD("present shrink: buf=%dx%d -> %dx%d (via %s)", bm.bmWidth, bm.bmHeight, tw, th, via);
                 {
                     LARGE_INTEGER t0, t1; BOOL r;
                     if (dw) g_st.shrinkWnd++; else g_st.shrinkMem++;
@@ -753,12 +935,12 @@ static BOOL WINAPI MyBitBlt(HDC hd,int x,int y,int w,int h,HDC hs,int sx,int sy,
                     QueryPerformanceCounter(&t0);
                     if (dw && rop == SRCCOPY && FastShrink(hd, x, y, w, h, hs, ob, sx, sy, tw, th)) {
                         if (InterlockedExchange(&g_fastLogged, 1) == 0)
-                            Log("present: fast shrink (own resample + 1:1 BitBlt)");
+                            LogD("present: fast shrink (own resample + 1:1 BitBlt)");
                         g_lastSrcDC = hs; g_lastSrcBmp = ob; g_lastDestWnd = dw;   /* for scroll/timer repaints */
                         r = TRUE;
                     } else {
                         if (InterlockedExchange(&g_fallbackLogged, 1) == 0)
-                            Log("present: StretchBlt fallback (dest window=%s rop=0x%08lX)", dw ? "yes" : "no", rop);
+                            LogD("present: StretchBlt fallback (dest window=%s rop=0x%08lX)", dw ? "yes" : "no", rop);
                         SetStretchBltMode(hd, COLORONCOLOR);
                         r = StretchBlt(hd, dx, dy, dw2, dh2, hs, sx, sy, w, h, rop);
                     }
@@ -819,8 +1001,27 @@ static int HookIAT(const char *dll, const char *fn, void *repl, void **orig) {
 static int InstallHooks(void) {
     int b = HookIAT("gdi32.dll",  "BitBlt",        (void*)MyBitBlt,        (void**)&g_realBitBlt);
     int m = b ? HookDetailMouse() : 0;
+    /* The engine's 400-byte bit-vector limit: OPU (OPUPatch.dll) hooks the middle of
+     * Viewport::SetSurface (a jmp at 0x0046F1D2, where the redraw vector pointer is stored) and
+     * supports larger vectors - its ForceFullRedraw relies on that hook too (Test 11). So under OPU
+     * we just drop our own cap and leave SetSurface to OPU. Without OPU the cap stays. */
+    {
+        int opu = GetModuleHandleA("OPUPatch.dll") != NULL;
+        BYTE *p = (BYTE*)0x0046F1D2;
+        if (!IsBadReadPtr(p, 8))
+            LogD("bit vectors: bytes at 0x0046F1D2 = %02X %02X %02X %02X %02X %02X %02X %02X (vanilla 89 86 08 08 00 00 ..), OPUPatch %s",
+                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], opu ? "loaded" : "not loaded");
+        g_bigVectors = g_bigView && opu;
+        LogD("bit vectors: %s", g_bigVectors ? "OPU handles SetSurface - 400-byte cap lifted"
+                               : !g_bigView ? "ZoomBigView=0 - 400-byte cap kept"
+                                            : "no OPUPatch - 400-byte cap kept");
+    }
     int a = (b && m) ? HookIAT("user32.dll", "GetClientRect", (void*)MyGetClientRect, (void**)&g_realGCR) : 0;
     int s = a ? HookIAT("user32.dll", "ScrollWindowEx", (void*)MyScrollWindowEx, (void**)&g_realScrollWindowEx) : 0;
+    /* Mission-load detection for the log / per-mission re-check only; optional (map-size changes are
+     * still caught without it). */
+    int l = a ? HookIAT("kernel32.dll", "LoadLibraryA", (void*)MyLoadLibraryA, (void**)&g_realLoadLibraryA) : 0;
+    if (!l || g_debug) Log("hooks: LoadLibraryA(mission detect)=%s", l ? "OK" : "FAILED (same-size map reloads not detected)");
     Log("hooks: BitBlt=%s  GetAbsolutePos(mouse)=%s  GetClientRect=%s  ScrollWindowEx=%s", b ? "OK" : "FAILED",
         m ? "OK" : (b ? "FAILED" : "skipped"), a ? "OK" : ((b && m) ? "FAILED" : "skipped"),
         s ? "OK" : (a ? "FAILED (scrolling will smear)" : "skipped"));
@@ -838,8 +1039,10 @@ static void ReadIni(void) {
     g_smooth   = GetPrivateProfileIntA("Game", "ZoomSmooth", 1, path) != 0;
     g_stats    = GetPrivateProfileIntA("Game", "ZoomStats",  0, path) != 0;
     g_blit32   = GetPrivateProfileIntA("Game", "ZoomBlit32", 1, path) != 0;
-    Log("WideZoom=%d ZoomWiden=%d ZoomSmooth=%d ZoomBlit32=%d ZoomStats=%d  (%s)",
-        g_wideZoom, g_widen, g_smooth, g_blit32, g_stats, path);
+    g_bigView  = GetPrivateProfileIntA("Game", "ZoomBigView", 1, path) != 0;
+    g_debug    = GetPrivateProfileIntA("Zoom", "Debug", 0, path) != 0;   /* 1 = full diagnostic log */
+    Log("WideZoom=%d ZoomWiden=%d ZoomSmooth=%d ZoomBlit32=%d ZoomBigView=%d ZoomStats=%d Debug=%d  (%s)",
+        g_wideZoom, g_widen, g_smooth, g_blit32, g_bigView, g_stats, g_debug, path);
 }
 
 /* Watch the engine zoom global and log every transition (read-only poll). */
@@ -851,8 +1054,8 @@ static DWORD WINAPI ZoomPollThread(LPVOID arg) {
         if (!IsBadReadPtr((void*)ADDR_ZOOM_GLOBAL, 4)) {
             int z = *(volatile int*)ADDR_ZOOM_GLOBAL;
             if (z != last) {
-                if (last == -999) Log("zoom: initial value = %d", z);
-                else              Log("zoom changed: %d -> %d  (wide level %s)",
+                if (last == -999) LogD("zoom: initial value = %d", z);
+                else              LogD("zoom changed: %d -> %d  (wide level %s)",
                                       last, z, (z == 1 && g_hooked) ? "ACTIVE" : "off");
                 last = z;
             }
@@ -865,7 +1068,7 @@ static DWORD WINAPI ZoomPollThread(LPVOID arg) {
 static volatile LONG g_done = 0;
 static void Init(void) {
     if (InterlockedExchange(&g_done, 1) != 0) return;    /* op2ext may call more than one entry point */
-    Log("=== op2ext init (InitMod) - op2zoom wide-zoom build ===");
+    Log("=== op2ext init (InitMod) - Zoom.dll wide-zoom build ===");
     ReadIni();
     {
         /* Verify-before-patch: the caller address ranges and coordinate maths below are only valid
@@ -898,11 +1101,11 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r) {
     (void)r;
     if (reason == DLL_PROCESS_ATTACH) {
         g_hInst = h; DisableThreadLibraryCalls(h);
-        Log("=== process attach - Outpost2 loaded op2zoom.dll ===");
+        LogD("=== process attach - Outpost2 loaded Zoom.dll ===");
     } else if (reason == DLL_PROCESS_DETACH) {
         g_stopPoll = 1;
         if (InterlockedExchange(&g_detached, 1) == 0)
-            Log("=== process detach - op2zoom.dll unloading (game exit) ===");
+            LogD("=== process detach - Zoom.dll unloading (game exit) ===");
     }
     return TRUE;
 }

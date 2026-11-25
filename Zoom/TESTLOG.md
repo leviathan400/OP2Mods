@@ -99,15 +99,15 @@ Wide zoom level functions end-to-end - renders ~2x more map, panels untouched, m
 - **Test on the OPU 1.4 install** (renderer bytes MATCH retail, so expected to work).
 
 ## Test 6 (2026-11-23) - retail 1.3.6, 1192x734 window - crash, speed and redraw fixes
-Install: retail 1.3.6 with the **2006 op2ext**, which ignores
+Install: retail 1.3.6 (with the **2006 op2ext**, which ignores
 `LoadAddons` and loads one mod via `Outpost2.exe /loadmod Zoom` -> `Zoom\op2mod.dll`). Renderer
 prologues `MATCH`; ini and log taken from the game folder as designed.
 
 Iterations (each a live run):
 1. **Crash ~1 s after start** at `Outpost2.exe+0x6F26C` (AV), also with the previous committed build
    (pre-existing; June tests used an 800x608 view). Cause: `Viewport::SetSurface` (`0x0046F160`) sizes
-   five redraw bit vectors from the surface, each a fixed `bitVectorBuf[400]` (the decompile's
-   `struct Viewport`). The 992x704 view at 2x needs 414 bytes -> overrun into the bit-vector pointers
+   five redraw bit vectors from the surface, each a fixed `bitVectorBuf[400]` inside
+   `struct Viewport`. The 992x704 view at 2x needs 414 bytes -> overrun into the bit-vector pointers
    (`+0x804..+0x814`) -> NULL write. **Fix:** pick the largest scale <= ZoomWiden (1/16 steps) whose
    bit vectors fit 400 bytes -> x31/16 (1.94x, 1922x1364 buffer). Transforms + mouse use the same
    scale, and only once the buffer is widened. `WideZoom=0` isolated it (no hooks -> no crash).
@@ -194,3 +194,68 @@ map pane is 1824x1088 logical, drawn at 2280x1360.
 - **Fix:** scale inside `Detail::GetAbsolutePos` (`0x00408070`) via vtable slot 10 (`0x004CF5E8`,
   only reference), which both the message path and `OnIdle` call; `lParam` is no longer touched.
   Scripted drag afterwards: the box runs exactly from the press point to the cursor.
+
+## Test 11 (2026-11-24) - OPU 1.4.1, lifting the 400-byte limit (full 2x)
+Goal: full ZoomWiden (2x) on the maximized 1824x1088 view, which the 400-byte bit vectors capped at
+x19/16. A scan of every `lea` in `.text` showed `Viewport::SetSurface` (`0x0046F160`) is the only
+code taking the embedded `bitVectorBuf[400]` addresses; the other 400-byte locals near the selection
+code (`GetMouseCursor`, `GetCommandMouseCursor`) size command highlight rectangles, not the view.
+
+1. Replaced `SetSurface` with an exact re-implementation using heap buffers above 400 bytes. Log:
+   `1824x1088 -> 3648x2176 (x32/16)`, `1050 bytes > 400 - using heap buffers`. Ran smoothly at 2x
+   (~200 Mpx/s presented, shrink ~340 ms/s, ~1.7 ms per Mpx) - **but selection-box lines lingered
+   again**.
+2. Cause: OPUPatch hooks the middle of `SetSurface` itself (`jmp` at `0x0046F1D2`, the
+   `mov [esi+808h],eax` that stores the redraw vector pointer) - the replacement skipped that hook,
+   disabling what OPU does there (its `ForceFullRedraw` included).
+3. Fix: when `OPUPatch.dll` is loaded, leave `SetSurface` to OPU and only drop the mod's own cap.
+   Log: `bytes at 0x0046F1D2 = E9 ..` (OPU's jmp), `OPU handles SetSurface - cap lifted`,
+   `1824x1088 -> 3648x2176 (x32/16)`. **OPU already supports vectors larger than 400 bytes.**
+   Result: full 2x, smooth, no crash, no lingering lines (user: "All good").
+
+The mod's own `SetSurface` replacement (step 1) was then removed: the mods target OPU 1.4.1 only, and
+OPU already handles the larger vectors. Without OPUPatch the 400-byte cap simply stays.
+
+## Test 12 (2026-11-24) - OPU 1.4.1, small maps (tutorial)
+Goal: keep the full 2x on large maps without breaking small ones. Maximized 1824x1088 view, ZoomWiden=2.
+
+1. **Crash on the tutorial** at `+0x7000A` (`MarkAnimatedTilesForRedraw`, `0x0046FF80`): at 2x the
+   view (2176 px tall) was taller than the map, and the tile loops (`((h + 31) >> 5) + 1` rows) read
+   past it. Added a cap: the scaled view must fit inside the map (tiles at `0x0054F808`/`0x0054F810`).
+2. **The cap did not apply:** the engine does not re-allocate the view on mission load, so the buffer
+   kept the size picked at the menu (no map yet). Fix: the view-transform hook compares the map's
+   cap with the current scale and posts `WM_SIZE` to the detail window; the engine re-allocates before
+   the first present. Log: `map now 1984x1952 px (buffer sized for 0x0): x32/16 -> x17/16, posting
+   WM_SIZE to re-allocate`.
+3. **Still crashed** with a view 2040 px tall, just inside the map: added a 3-tile margin.
+4. **Loaded, but structures missing** at 1.75x: object positions relative to the view are folded
+   modulo the map's wrap width (pixel mask `0x0054F7FC`) into +/- half of it, so on a view wider than
+   half the map the far side is culled. Fix: width capped at half the wrap width minus 64 px.
+5. **Result:** tutorial at **x17/16 (~1.06x)** (`wide buffer: 1824x1088 -> 1938x1156`), no crash,
+   all structures drawn (user: "all looks good"); large maps still at 2x.
+
+Afterwards a plain `ZOOM LEVEL: <scale> (max ...) - map <w>x<h> tiles, view <w>x<h>` line was added
+to the log, written once per map (and whenever the chosen scale changes).
+
+## Test 13 (2026-11-25) - OPU 1.4.1, mission/zoom log lines and mission switching
+Changes: the DLL is now `Zoom.dll` and the log `logs\Zoom.log`. Each mission load logs
+`MISSION: <dll> - "<LevelDesc>"` and `ZOOM LEVEL: <scale> (max ...) - map WxH tiles, view WxH`.
+Mission loads are detected through a `LoadLibraryA` IAT hook (mission DLL = exports `DescBlock` +
+`InitProc`), so same-size maps and reloads of the same mission re-check and log too, and a map that
+got 1.00x no longer leaves the next map unwidened.
+
+Three missions in one session (exit to menu between them), maximized 1824x1088 view:
+
+| Mission | Map (tiles) | Logged zoom |
+|---|---|---|
+| `CEP1.dll` - Colony Builder - Eden, Population | 512x256 | 2.00x |
+| `t14.dll` - Tutorial E - Eden Unit Reference | 128x64 | 1.06x, capped by map size (re-sized down via WM_SIZE) |
+| `c_dcsmp.dll` - Colony Builder - Eden, Civil War | 256x128 | 2.00x (re-sized back up via WM_SIZE) |
+
+Each load got its own MISSION / ZOOM LEVEL lines with the right scale. Not yet run: the same mission
+twice in a row, a saved-game load.
+
+Then `[Zoom] Debug` (default 0) was added. With `Debug=0` the tutorial session logged 6 lines (init,
+settings, hooks, loaded OK, MISSION, ZOOM LEVEL). With `Debug=1` the full diagnostics are back, and
+two more switches were right: `c_ashes.dll` (Rising From the Ashes, 128x256 map) 1.06x - its narrow
+width caps it - then `CPS1.dll` (Plymouth, Starship, 256x128) back to 2.00x.

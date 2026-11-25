@@ -109,7 +109,7 @@ hook must special-case ONLY the viewport surface (side panes keep BitBlt 1:1).
 ## Build / tooling
 - VS toolchain, **x86** (`vcvars32`). op2ext headers/sources from the
   op2ext project (OutpostUniverse/op2ext).
-- Decompiles: annotated retail 1.3.6 decompiles.
+- Reference: the retail 1.3.6 `Outpost2.exe` code (function names and addresses as used below).
 
 ## Status - WORKING (2026-06-23)
 Steps 0-4 done. The wide zoom level renders ~2x more map in the detail viewport with the sidebar
