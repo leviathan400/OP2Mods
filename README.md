@@ -1,4 +1,7 @@
 # OP2Mods
+
+[![Build](https://github.com/leviathan400/OP2Mods/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/leviathan400/OP2Mods/actions/workflows/build.yml)
+
 Some mods for Outpost 2: Divided Destiny
 
 ## Mods
