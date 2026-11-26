@@ -28,7 +28,7 @@ REM --- deploy to the OPU folder ---
 set "DEST=D:\Outpost 2\OPU"
 if not exist "%DEST%\OPULauncher.exe" ( echo (OPU folder not found at "%DEST%" - copy op2launcher.exe there yourself) & goto :done )
 copy /y op2launcher.exe "%DEST%\op2launcher.exe" >nul
-echo Deployed op2launcher.exe to "%DEST%"
+if errorlevel 1 ( echo NOT deployed: "%DEST%\op2launcher.exe" is in use - copy it again when it isn't ) else ( echo Deployed op2launcher.exe to "%DEST%" )
 if not exist "%DEST%\op2launcher.ini" (
   copy /y op2launcher.ini "%DEST%\op2launcher.ini" >nul
   echo Deployed op2launcher.ini to "%DEST%"

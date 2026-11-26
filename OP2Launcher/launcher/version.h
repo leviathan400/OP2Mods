@@ -7,4 +7,4 @@
 
 #define MODVER_MAJOR 0
 #define MODVER_MINOR 9
-#define MODVER_PATCH 7
+#define MODVER_PATCH 8

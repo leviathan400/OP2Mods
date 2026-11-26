@@ -6,7 +6,7 @@ agents.
 
 It replaces the old keystroke-driven debug menu, which could only start what it listed.
 
-Current version: **0.9.7** (set in [`launcher/version.h`](launcher/version.h), shared by both parts).
+Current version: **0.9.8** (set in [`launcher/version.h`](launcher/version.h), shared by both parts).
 
 ## Two parts
 

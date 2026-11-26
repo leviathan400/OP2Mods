@@ -114,6 +114,6 @@ Copy `op2launcher` (and optionally `op2launcher.ini`) into the Wine prefix's OPU
 | `op2launcher.cpp` | the whole tool: ini install/uninstall, arg handling, starting OPU (Windows + POSIX) |
 | `op2launcher.ini` | default-mission config template |
 | `launcher.rc`, `ConVec.ico` | Windows icon and version info (FileDescription `OP2Launcher`) |
-| `..\launcher\version.h` | **the version number** (currently 0.9.7), shared with `Launcher.dll`; bump it there |
+| `..\launcher\version.h` | **the version number** (currently 0.9.8), shared with `Launcher.dll`; bump it there |
 | `CHANGELOG.md` | release history of `op2launcher.exe` |
 | `build.bat`, `build.sh` | Windows / Linux builds |

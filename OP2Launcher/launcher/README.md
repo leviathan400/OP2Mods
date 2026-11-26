@@ -8,7 +8,7 @@ folder and every subfolder of `OPU\base\maps\` and `OPU\maps\` (where OPU keeps 
 keeping only DLLs that export `DescBlock` and each name once - the same list as the game's own
 "PICK A SCRIPT" dialog. A **Filter** box at the top (focused when the picker opens) narrows the
 list as you type to the missions whose name starts with the text; Enter launches the typed name,
-the selection, or the only match left. When an entry stays selected for half a second, the panel
+the selection, or the only match left. When an entry stays selected for 0.2 s, the panel
 under LAUNCH / CANCEL shows the mission's details, read from the DLL's exports without loading it:
 its name (`LevelDesc`), type, players and max tech level (`DescBlock`), map (`MapName`), tech tree
 (`TechtreeName`) and where the file is.
@@ -112,13 +112,16 @@ wplDisable();  // skin off
 `#32770` dialog created while enabled - we don't owner-draw anything. odasl paints its own caption,
 so dropping `WS_SYSMENU` from the template leaves a clean title with no Windows icon.
 
-Two skin quirks the details panel works around:
-- **Don't change a skinned label's text.** `WM_SETTEXT` makes a static repaint itself at once with
-  plain Windows drawing (white background), bypassing the skin, and nothing erases the old text, so
-  the end of a longer previous line shows through. The details lines are therefore separate labels
-  that are **destroyed and re-created** for each mission. Destroying one makes the dialog repaint its
-  background there. The new ones are created after odasl skinned the dialog, so the dialog answers
-  their `WM_CTLCOLORSTATIC` itself: transparent (hollow brush) in the skin's label colour.
+Two skin quirks the picker works around:
+- **Never change a label's text.** `WM_SETTEXT` makes a static repaint itself at once with plain
+  Windows drawing (white background), bypassing the skin, and nothing erases the old text, so the
+  end of a longer previous text shows through. A static created later isn't skinned at all. So
+  every label the code writes to - the list caption (its count changes as you filter), the version
+  and the details lines - is **destroyed and re-created** instead (`ReplaceLabel`, and `SetInfo`
+  for the details). Destroying one makes the dialog repaint its background there. The dialog then
+  answers the new labels' `WM_CTLCOLORSTATIC` itself: transparent (hollow brush) in the skin's
+  label colour, so they look like the skinned ones. The fixed captions in `picker.rc` are left to
+  the skin.
 - **Alt.** The first Alt press switches on keyboard cues and repaints every label in plain Windows
   style. `WM_INITDIALOG` sends `WM_CHANGEUISTATE(UIS_CLEAR, UISF_HIDEACCEL | UISF_HIDEFOCUS)`, so
   the cues are on from the start and Alt changes nothing.

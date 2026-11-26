@@ -5,6 +5,16 @@ saved game. The command-line front-end has its own changelog: [`../exe/CHANGELOG
 
 The version is set in [`version.h`](version.h) and shared with `op2launcher.exe`.
 
+## [0.9.8] - 2026-11-26
+
+### Added
+- The picker shows **"OP2Launcher vX.Y.Z"** bottom right (from `version.h`).
+
+### Changed
+- The mission details now appear **0.2 s** after a selection (was 0.5 s).
+- `build.bat` reports when it can't copy `Launcher.dll` into the OPU folder (the game has it in
+  use) instead of always printing "Deployed".
+
 ## [0.9.7] - 2026-11-26
 
 ### Added

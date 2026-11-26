@@ -22,6 +22,9 @@ BEGIN
     DEFPUSHBUTTON   "LAUNCH", IDC_LAUNCH, 228, 14, 88, 16
     PUSHBUTTON      "CANCEL", IDCANCEL, 324, 14, 88, 16
     LTEXT           "Mission details:", -1, 228, 44, 184, 9
+    // Version, bottom right on the type-a-name row; picker.cpp fills it from version.h in
+    // WM_INITDIALOG and draws it transparent (WM_CTLCOLORSTATIC), like the details rows.
+    RTEXT           "", IDC_VERSION, 228, 218, 184, 9, SS_NOPREFIX
     // The details rows (x 228, y 56, 184 wide, 9 apart) are NOT here: picker.cpp's SetInfo
     // creates them fresh for each mission - see the comment there.
 END

@@ -5,6 +5,14 @@ changelog: [`../launcher/CHANGELOG.md`](../launcher/CHANGELOG.md).
 
 The version is set in [`../launcher/version.h`](../launcher/version.h) and shared with `Launcher.dll`.
 
+## [0.9.8] - 2026-11-26
+
+### Changed
+- Version 0.9.8, shared with `Launcher.dll` 0.9.8 (whose picker now shows its version and shows the
+  mission details sooner).
+- `build.bat` reports when it can't copy `op2launcher.exe` into the OPU folder instead of always
+  printing "Deployed".
+
 ## [0.9.7] - 2026-11-26
 
 ### Fixed

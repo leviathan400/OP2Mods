@@ -14,7 +14,7 @@
 // launches the name in the "type any DLL name" box, else the list's selection, else the only
 // match left.
 //
-// Mission details: when a list entry stays selected for half a second, the panel under the
+// Mission details: when a list entry stays selected for 0.2 s, the panel under the
 // buttons shows what the DLL says about itself - its LevelDesc (the mission's name), the
 // DescBlock (mission type, players, max tech level, unit mission), MapName and TechtreeName -
 // plus where the file is. All read straight from the file's exports (see PeFile); the DLL is
@@ -37,6 +37,7 @@
 #include <cctype>
 #include "resource.h"
 #include "engine.h"
+#include "version.h"          // MODVER_MAJOR/MINOR/PATCH, shown bottom right
 
 static std::string g_result;
 
@@ -262,8 +263,8 @@ static std::string MissionDetails(const Mission& m) {
 
 // ---- the dialog ---------------------------------------------------------------------------
 
-static const UINT_PTR kDetailsTimer = 1;                     // fires 500 ms after the last selection change
-static const UINT     kDetailsDelayMs = 500;
+static const UINT_PTR kDetailsTimer = 1;                     // fires 200 ms after the last selection change
+static const UINT     kDetailsDelayMs = 200;
 
 static void CenterOnScreen(HWND hDlg) {
     RECT rc; GetWindowRect(hDlg, &rc);
@@ -297,6 +298,39 @@ static const Mission* FindMission(const char* name) {
 
 static void SetInfo(HWND hDlg, const char* text);           // below: clean repaint of the details label
 
+// ---- labels whose text the code sets ------------------------------------------------------
+// odasl draws the dialog's labels transparently over its background picture, but only the ones
+// that exist when it skins the dialog and keep their text. Changing a label's text (WM_SETTEXT)
+// makes the static repaint itself straight away with plain Windows drawing - a white box - and
+// never erases the old text, so a longer previous text's tail shows through. A static created
+// later isn't skinned at all (also a white box). So every label the code writes to:
+//   1. is never given new text: ReplaceLabel destroys it and creates a new one in the same place
+//      (destroying makes the dialog repaint its background there, wiping the old text);
+//   2. is drawn by the dialog itself: WM_CTLCOLORSTATIC answers "transparent (hollow brush), in
+//      the skin's label colour" for these ids (IsCodeLabel), so it looks like the skinned ones.
+// The labels set from code: the list caption (count changes as you filter), the version and the
+// details rows. The fixed captions in picker.rc are left to the skin.
+static const COLORREF kSkinLabelColour = RGB(181, 210, 152);  // sampled from the skin's labels
+
+static bool IsCodeLabel(int id) {
+    return id == IDC_LISTLABEL || id == IDC_VERSION || (id >= IDC_INFO0 && id < IDC_INFO0 + INFO_ROWS);
+}
+
+// Replace label `id` with a fresh static showing `text`, same position, alignment and font.
+static void ReplaceLabel(HWND hDlg, int id, const char* text) {
+    HWND old = GetDlgItem(hDlg, id);
+    if (!old) return;
+    RECT rc; GetWindowRect(old, &rc);
+    MapWindowPoints(nullptr, hDlg, (POINT*)&rc, 2);           // screen -> dialog client coords
+    DWORD style = (DWORD)GetWindowLongA(old, GWL_STYLE) & (SS_TYPEMASK | SS_NOPREFIX);  // e.g. SS_RIGHT
+    HFONT font = (HFONT)SendMessageA(old, WM_GETFONT, 0, 0);
+    DestroyWindow(old);
+    HWND lbl = CreateWindowExA(0, "STATIC", text, WS_CHILD | WS_VISIBLE | style,
+                               rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                               hDlg, (HMENU)(INT_PTR)id, GetModuleHandleA(nullptr), nullptr);
+    if (lbl && font) SendMessageA(lbl, WM_SETFONT, (WPARAM)font, FALSE);
+}
+
 // Refill the list box with the missions whose name STARTS with the Filter box's text
 // (case-insensitive; an empty filter shows all), and put the count in the list's caption.
 // Redraw is switched off while refilling so the list doesn't flicker on every keystroke.
@@ -318,7 +352,7 @@ static void ApplyFilter(HWND hDlg) {
     char label[96];
     if (flen) wsprintfA(label, "Mission / scenario DLLs (%d of %d):", shown, (int)g_all.size());
     else      wsprintfA(label, "Mission / scenario DLLs (%d):", (int)g_all.size());
-    SetDlgItemTextA(hDlg, IDC_LISTLABEL, label);
+    ReplaceLabel(hDlg, IDC_LISTLABEL, label);                 // never SetDlgItemText: see ReplaceLabel
     KillTimer(hDlg, kDetailsTimer);                           // the selection is gone
     SetInfo(hDlg, "");
 }
@@ -326,14 +360,9 @@ static void ApplyFilter(HWND hDlg) {
 // Show `text` in the details panel, one label per line ("\r\n"-separated; past INFO_ROWS lines
 // is dropped).
 //
-// The labels are DESTROYED AND RE-CREATED every time, never given new text. Changing a skinned
-// static's text (WM_SETTEXT) makes the control repaint itself at once with plain Windows drawing -
-// a white background - bypassing the skin, and nothing erases the old text first, so the end of
-// a longer previous line stayed visible. Destroying a label instead makes the dialog repaint its
-// background there, wiping the old text. The new labels are created after odasl skinned the
-// dialog, so the skin leaves them alone; they ask the dialog for colours (WM_CTLCOLORSTATIC in
-// DlgProc), which answers "transparent, in the skin's label colour" - so they look like the
-// skinned labels and show the dialog's picture behind them.
+// The rows are destroyed and created fresh every time, never given new text, and drawn
+// transparent by WM_CTLCOLORSTATIC - the same rules as ReplaceLabel (see the comment there).
+// They're created here rather than replaced, because a mission has a varying number of lines.
 static void SetInfo(HWND hDlg, const char* text) {
     for (int row = 0; row < INFO_ROWS; row++) {               // remove the previous mission's rows
         HWND old = GetDlgItem(hDlg, IDC_INFO0 + row);
@@ -367,19 +396,25 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
         // patches over the skin's background.
         SendMessageA(hDlg, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEACCEL | UISF_HIDEFOCUS), 0);
         ApplyFilter(hDlg);                                   // empty filter: everything
+        {   // "OP2Launcher vX.Y.Z" bottom right (a code-set label: see ReplaceLabel).
+            char ver[48];
+            wsprintfA(ver, "OP2Launcher v%d.%d.%d", MODVER_MAJOR, MODVER_MINOR, MODVER_PATCH);
+            ReplaceLabel(hDlg, IDC_VERSION, ver);
+        }
         CenterOnScreen(hDlg);
         SetFocus(GetDlgItem(hDlg, IDC_FILTER));               // start typing straight away
         return FALSE;                                        // FALSE: we set the focus ourselves
     }
     case WM_CTLCOLORSTATIC: {
-        // The details rows are created at run time, after odasl skinned the dialog, so the skin
-        // doesn't draw them: a plain static asks its parent (us) for colours, and the default
-        // answer is Windows' grey/white box. Answer for those rows: transparent background (a
-        // hollow brush, so the dialog's picture shows through) and the skin's label colour.
+        // The labels the code writes to (IsCodeLabel) are created at run time, after odasl
+        // skinned the dialog, so the skin doesn't draw them: a plain static asks its parent (us)
+        // for colours, and the default answer is Windows' grey/white box. Answer: transparent
+        // background (a hollow brush, so the dialog's picture shows through) and the skin's
+        // label colour.
         int id = GetDlgCtrlID((HWND)lParam);
-        if (id >= IDC_INFO0 && id < IDC_INFO0 + INFO_ROWS) {
+        if (IsCodeLabel(id)) {
             HDC dc = (HDC)wParam;
-            SetTextColor(dc, RGB(181, 210, 152));            // the skin's label text colour
+            SetTextColor(dc, kSkinLabelColour);
             SetBkMode(dc, TRANSPARENT);
             return (INT_PTR)GetStockObject(HOLLOW_BRUSH);
         }
@@ -387,7 +422,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_TIMER:
         if (wParam == kDetailsTimer) {
-            // The selection has held for 500 ms: show that DLL's details.
+            // The selection has held for 200 ms: show that DLL's details.
             KillTimer(hDlg, kDetailsTimer);
             HWND list = GetDlgItem(hDlg, IDC_LIST);
             int sel = (int)SendMessageA(list, LB_GETCURSEL, 0, 0);

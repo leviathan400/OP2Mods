@@ -37,7 +37,11 @@ REM --- deploy straight into the OPU folder (no sub-folder) ---
 set "DEST=D:\Outpost 2\OPU"
 if exist "%DEST%\OPULauncher.exe" (
   copy /y Launcher.dll "%DEST%\Launcher.dll" >nul
-  echo Deployed to "%DEST%\Launcher.dll"
+  if errorlevel 1 (
+    echo NOT deployed: "%DEST%\Launcher.dll" is in use - close Outpost 2 and copy it again.
+  ) else (
+    echo Deployed to "%DEST%\Launcher.dll"
+  )
 ) else (
   echo OPU folder not found at "%DEST%" - copy Launcher.dll there yourself.
 )

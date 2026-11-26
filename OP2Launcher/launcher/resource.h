@@ -6,6 +6,7 @@
 #define IDC_LAUNCH     1003
 #define IDC_FILTER     1004   // "Filter:" edit - shows only missions starting with its text
 #define IDC_LISTLABEL  1005   // the list's caption, updated with the match count
+#define IDC_VERSION    1007   // "OP2Launcher vX.Y.Z", bottom right (from version.h)
 // Mission details: up to INFO_ROWS single-line labels, IDC_INFO0 + row, created at run time by
 // picker.cpp's SetInfo (not in picker.rc) - a fresh set for each mission.
 #define IDC_INFO0      1100
