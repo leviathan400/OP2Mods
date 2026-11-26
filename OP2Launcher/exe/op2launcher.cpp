@@ -15,6 +15,9 @@
 //   op2launcher --load <save>     (boot into a saved game, e.g. saves\SGAME0.OP2; relative
 //                                  to the OPU folder, or absolute)
 //   op2launcher --uninstall       (remove Launcher from outpost2.ini; keeps Launcher.dll)
+//   op2launcher --help            (usage; also -h, -?, /?)
+// An unknown option (anything starting with '-', or a short /x) or an extra argument prints
+// an error + the usage and exits with code 1 WITHOUT changing the ini or starting the game.
 //
 // WHAT IT DOES, in outpost2.ini:
 //   0. INSTALL (only if missing): adds [ExternalModules] Launcher=yes and a default
@@ -259,6 +262,29 @@ static bool LaunchOpu(const std::string& opu, const std::string& dir) {
 #endif
 }
 
+// ---- command line ------------------------------------------------------------
+
+static void PrintUsage() {
+    printf("Usage: op2launcher <mission.dll>   e.g. op2launcher e04.dll\n");
+    printf("   or set [Launcher] Dll=<mission.dll> in op2launcher.ini and run op2launcher\n");
+    printf("   op2launcher --picker             boot into the in-game \"Launch a DLL\" menu\n");
+    printf("   op2launcher --load <save>        boot into a saved game, e.g. saves\\SGAME0.OP2\n");
+    printf("   op2launcher --uninstall          remove Launcher from outpost2.ini (keeps the DLL)\n");
+    printf("   op2launcher --help               show this help\n");
+}
+
+static bool Is(const char* a, const char* longName, const char* shortName) {
+    return strcmp(a, longName) == 0 || strcmp(a, shortName) == 0;
+}
+
+// An argument that looks like an option (-x, --xyz, or /x on Windows) rather than a mission
+// name. Mission names never start with these, so anything like this that isn't a known option
+// is a typo - and must NOT be written to the ini as Mission= and launched.
+static bool LooksLikeOption(const char* a) {
+    return a[0] == '-' || (a[0] == '/' && a[1] != '\0' && strchr(a + 1, '/') == nullptr
+                                       && strchr(a + 1, '\\') == nullptr && strlen(a) <= 3);
+}
+
 // ---- main ------------------------------------------------------------------
 
 int main(int argc, char** argv) {
@@ -267,8 +293,35 @@ int main(int argc, char** argv) {
     std::string opu     = dir + "OPULauncher.exe";
     std::string selfIni = dir + "op2launcher.ini";
 
+    // Check the command line BEFORE touching the ini or starting anything: a wrong argument
+    // must only print an error, never launch the game.
+    //   no args                 -> mission from op2launcher.ini
+    //   <mission.dll>           -> exactly one non-option argument
+    //   --picker | --uninstall  -> no further arguments
+    //   --load <save>           -> exactly one argument after it
+    //   --help / -h / -? / /?   -> usage, exit 0
+    if (argc > 1) {
+        const char* a = argv[1];
+        if (Is(a, "--help", "-h") || strcmp(a, "-?") == 0 || strcmp(a, "/?") == 0) {
+            PrintUsage();
+            return 0;
+        }
+        bool known = Is(a, "--picker", "-p") || Is(a, "--uninstall", "-u") || Is(a, "--load", "-l");
+        if (LooksLikeOption(a) && !known) {
+            printf("Unknown option: %s\n\n", a);
+            PrintUsage();
+            return 1;
+        }
+        int maxArgs = Is(a, "--load", "-l") ? 3 : 2;      // program + option/mission (+ save)
+        if (argc > maxArgs) {
+            printf("Unexpected argument: %s\n\n", argv[maxArgs]);
+            PrintUsage();
+            return 1;
+        }
+    }
+
     // --uninstall: remove the module from the ini (DLL stays on disk), then exit.
-    if (argc > 1 && (strcmp(argv[1], "--uninstall") == 0 || strcmp(argv[1], "-u") == 0)) {
+    if (argc > 1 && Is(argv[1], "--uninstall", "-u")) {
         Uninstall(ini);
         return 0;
     }
@@ -296,10 +349,7 @@ int main(int argc, char** argv) {
     if (!picker && load.empty()) {
         dll = (argc > 1) ? std::string(argv[1]) : ReadDefaultDll(selfIni);
         if (dll.empty()) {
-            printf("Usage: op2launcher <mission.dll>   e.g. op2launcher e04.dll\n");
-            printf("   or set [Launcher] Dll=<mission.dll> in op2launcher.ini\n");
-            printf("   op2launcher --picker             boot into the in-game \"Launch a DLL\" menu\n");
-            printf("   op2launcher --uninstall          remove Launcher from outpost2.ini (keeps the DLL)\n");
+            PrintUsage();
             return 1;
         }
     }

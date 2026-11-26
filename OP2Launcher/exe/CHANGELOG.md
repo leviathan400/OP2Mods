@@ -5,6 +5,22 @@ changelog: [`../launcher/CHANGELOG.md`](../launcher/CHANGELOG.md).
 
 The version is set in [`../launcher/version.h`](../launcher/version.h) and shared with `Launcher.dll`.
 
+## [0.9.7] - 2026-11-26
+
+### Fixed
+- **A wrong argument no longer launches the game.** Before, any first argument that wasn't a known
+  option was taken as a mission name, so a typo like `--pick` or `--help` was written to the ini as
+  `Mission=--pick` and Outpost 2 started, ending in "Could not load script file". Now an unknown
+  option (anything starting with `-`, or a short `/x`) or an extra argument prints an error and the
+  usage and exits with code 1, without changing the ini or starting anything.
+
+### Added
+- `--help` / `-h` / `-?` / `/?` print the usage (exit code 0). The usage now lists `--load` too.
+
+### Changed
+- Version 0.9.7, shared with `Launcher.dll` 0.9.7 (whose picker now lists every mission DLL and
+  has a filter box).
+
 ## [0.9.6] - 2026-11-22
 
 ### Added

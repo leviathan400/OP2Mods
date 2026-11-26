@@ -6,7 +6,7 @@ agents.
 
 It replaces the old keystroke-driven debug menu, which could only start what it listed.
 
-Current version: **0.9.6** (set in [`launcher/version.h`](launcher/version.h), shared by both parts).
+Current version: **0.9.7** (set in [`launcher/version.h`](launcher/version.h), shared by both parts).
 
 ## Two parts
 
@@ -19,9 +19,12 @@ The two only talk through `outpost2.ini`. The exe writes the `[Launcher]` sectio
 reads it at startup. Every launch is one-shot: the module sets `Enabled=0` again once it has fired,
 so the next normal start of OPU is unmodded.
 
-The in-game picker (`op2launcher.exe --picker`), skinned to match OP2's own dialogs:
+The in-game picker (`op2launcher.exe --picker`), skinned to match OP2's own dialogs. It lists every
+mission DLL the game can load (the same list as the game's own "PICK A SCRIPT" dialog), narrows it
+as you type in the Filter box, and shows the selected mission's details - name, type, players, max
+tech level, map, tech tree and file - read from the DLL's exports:
 
-![The OP2Launcher picker: a list of mission and scenario DLLs, a box to type any DLL name, and LAUNCH / CANCEL buttons](images/picker.png)
+![The OP2Launcher picker: a filter box, the list of mission DLLs, a box to type any DLL name, LAUNCH / CANCEL buttons, and the selected mission's details](images/picker.png)
 
 ## Quick start
 
@@ -33,7 +36,11 @@ op2launcher.exe e04.dll                     boot straight into a mission DLL
 op2launcher.exe --picker                    boot into the in-game "Launch a DLL" picker
 op2launcher.exe --load saves\SGAME0.OP2     boot into a saved game
 op2launcher.exe --uninstall                 remove Launcher from outpost2.ini
+op2launcher.exe --help                      show the usage
 ```
+
+A wrong option or an extra argument only prints an error; it never changes the ini or starts the
+game.
 
 The first run registers the module in `outpost2.ini` by itself. Mission DLL names can be at most
 31 characters, the size of the engine's `scriptName` field. Lua-mission saves keep their script

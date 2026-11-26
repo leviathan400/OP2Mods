@@ -2,8 +2,16 @@
 
 An **op2ext module** for Outpost 2 (OPU 1.4.1) that boots the game **straight into any
 mission/scenario/colony DLL** - by filename, with no menu navigation and no keystroke automation.
-It can auto-launch a DLL named in `outpost2.ini`, or pop a picker that lists every DLL in the
-install (and lets you type any name).
+It can auto-launch a DLL named in `outpost2.ini`, or pop a picker that lists every mission DLL the
+game can load (and lets you type any name). The list covers the `Outpost2.exe` folder, the OPU
+folder and every subfolder of `OPU\base\maps\` and `OPU\maps\` (where OPU keeps most missions),
+keeping only DLLs that export `DescBlock` and each name once - the same list as the game's own
+"PICK A SCRIPT" dialog. A **Filter** box at the top (focused when the picker opens) narrows the
+list as you type to the missions whose name starts with the text; Enter launches the typed name,
+the selection, or the only match left. When an entry stays selected for half a second, the panel
+under LAUNCH / CANCEL shows the mission's details, read from the DLL's exports without loading it:
+its name (`LevelDesc`), type, players and max tech level (`DescBlock`), map (`MapName`), tech tree
+(`TechtreeName`) and where the file is.
 
 This replaces the brittle "send `d`,`r`,`c`,Enter to the debug menu" approach (which can only
 start whatever the debug menu happens to enumerate). Launcher can load **any** DLL.
@@ -73,7 +81,9 @@ its script carrying on under OP2Lua 0.8.8 and later, which keeps the script's st
 The op2ext module (`Launcher.dll`):
 - [`engine.h`](engine.h) - the engine calls we use: `OnLoadScript` + `ActivateGame` (+ `StartGame`).
 - [`launcher.cpp`](launcher.cpp) - DllMain, `InitMod`/`DestroyMod`, ini config, the trigger hook, the launch, one-shot self-disable.
-- [`picker.cpp`](picker.cpp) - the "pick a DLL" dialog (real `DialogBox`, see skinning note below).
+- [`picker.cpp`](picker.cpp) - the "pick a DLL" dialog (real `DialogBox`, see skinning note below):
+  finding the missions, the filter, and the details panel (`PeFile` reads a DLL's exports straight
+  from the file).
 - [`picker.rc`](picker.rc) + [`resource.h`](resource.h) - the dialog template (no `WS_SYSMENU`, so no title-bar icon).
 - [`build.bat`](build.bat) - x86 build to `Launcher.dll` (compiles `picker.rc`), auto-deploys to `D:\Outpost 2\OPU\`.
 
@@ -101,6 +111,17 @@ wplDisable();  // skin off
 `OP2Shell.dll` imports + initialises `odasl.dll` in-process, so its `WH_CBT` hook auto-skins any
 `#32770` dialog created while enabled - we don't owner-draw anything. odasl paints its own caption,
 so dropping `WS_SYSMENU` from the template leaves a clean title with no Windows icon.
+
+Two skin quirks the details panel works around:
+- **Don't change a skinned label's text.** `WM_SETTEXT` makes a static repaint itself at once with
+  plain Windows drawing (white background), bypassing the skin, and nothing erases the old text, so
+  the end of a longer previous line shows through. The details lines are therefore separate labels
+  that are **destroyed and re-created** for each mission. Destroying one makes the dialog repaint its
+  background there. The new ones are created after odasl skinned the dialog, so the dialog answers
+  their `WM_CTLCOLORSTATIC` itself: transparent (hollow brush) in the skin's label colour.
+- **Alt.** The first Alt press switches on keyboard cues and repaints every label in plain Windows
+  style. `WM_INITDIALOG` sends `WM_CHANGEUISTATE(UIS_CLEAR, UISF_HIDEACCEL | UISF_HIDEFOCUS)`, so
+  the cues are on from the start and Alt changes nothing.
 
 ## Build
 ```
@@ -176,13 +197,13 @@ launcher is the thing that sets it.
 Paths are resolved from the **current directory** (OPULauncher runs the game with cwd = the OPU
 runtime dir, where op2ext reads `outpost2.ini` and writes `Outpost2Log.txt`), NOT from the raw
 `Outpost2.exe` folder in the root (that's the dead, unpatched GOG copy). A log is written to
-`D:\Outpost 2\OPU\logs\launcher.log` (load, resolved dir/ini, config, the detected shell window,
+`<OPU>\logs\Launcher.log` (load, resolved dir/ini, config, the detected shell window,
 and the launch sequence).
 
 ## Status / notes
 - **Working** - boots OPU 1.4.1 straight into an arbitrary mission/scenario/colony DLL, both via the
   picker and via `op2launcher.exe` (verified live with `e0x.dll`, `t14.dll`, smoke-test DLLs).
-  `launcher.log` records each launch; "Could not load script file" in-game means the DLL name was
+  `Launcher.log` records each launch; "Could not load script file" in-game means the DLL name was
   wrong or it lacks the required exports.
 - **`op2launcher.exe` first-run self-install verified** - run against an ini with no `Launcher`
   entry, it prints "Installing Launcher into outpost2.ini (first-time setup)...", creates

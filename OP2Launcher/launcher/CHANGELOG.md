@@ -5,6 +5,38 @@ saved game. The command-line front-end has its own changelog: [`../exe/CHANGELOG
 
 The version is set in [`version.h`](version.h) and shared with `op2launcher.exe`.
 
+## [0.9.7] - 2026-11-26
+
+### Added
+- **Filter box** at the top of the picker, focused when it opens. As you type, the list shows only
+  the missions whose name starts with the text (case-insensitive), and its caption shows the count
+  (e.g. "37 of 186"). Enter launches the name in the "type any DLL name" box, else the list's
+  selection, else the only match left. A picked name that no longer matches the filter is cleared.
+- **Mission details panel.** When a list entry stays selected for 0.5 s, the picker reads the DLL's
+  exports straight from the file (the DLL is never loaded, so none of its code runs) and shows its
+  `LevelDesc` name, mission type, players, max tech level and unit-mission flag (`DescBlock`),
+  `MapName`, `TechtreeName` and the file's location. Mission types: 1-12 campaign mission, -1
+  colony, -2 auto-demo, -3 tutorial, -4 Land Rush, -5 Space Race, -6 Resource Race, -7 Midas,
+  -8 Last One Standing.
+
+### Fixed
+- **The picker now lists every mission.** It used to list only the DLLs next to `Outpost2.exe`,
+  but OPU keeps most missions in per-map subfolders (`OPU\base\maps\<map>\`, `OPU\maps\<map>\`,
+  including the LUA missions and official demos). It now scans the exe folder, the OPU folder and
+  both maps trees, keeps only DLLs that export `DescBlock` (read from the file, never loaded) and
+  shows each name once. On a full OPU install that's 186 missions, matching the game's own
+  "PICK A SCRIPT" list. The hand-kept list of engine DLLs to hide is gone.
+
+### Changed
+- The picker is wider: LAUNCH and CANCEL sit side by side at the top right, with the details panel
+  under them. The details are label / value pairs on two lines each, drawn as transparent text over
+  the skin's background. Each line is its own label, destroyed and re-created for every mission
+  rather than given new text: changing a skinned label's text made Windows repaint it plain white
+  with the previous text showing through. The new labels are drawn transparent in the skin's
+  label colour by the dialog itself (`WM_CTLCOLORSTATIC`). The dialog also shows keyboard cues
+  from the start, so pressing Alt doesn't repaint the labels in plain Windows white.
+- Picker label: "Mission / scenario DLLs:" (was "... in this folder:").
+
 ## [0.9.6] - 2026-11-22
 
 ### Added

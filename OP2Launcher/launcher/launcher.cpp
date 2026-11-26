@@ -31,7 +31,7 @@ static HINSTANCE g_hInst = nullptr;
 static char      g_section[64] = "Launcher";
 static char      g_gameDir[MAX_PATH] = "";   // op2ext game dir (the OPU runtime dir), trailing slash
 static char      g_iniPath[MAX_PATH] = "";   // <gameDir>outpost2.ini
-static char      g_logPath[MAX_PATH] = "";   // <gameDir>logs\launcher.log
+static char      g_logPath[MAX_PATH] = "";   // <gameDir>logs\Launcher.log
 
 // config
 static bool        g_enabled = false;   // [Launcher] Enabled=1/0 - the everyday on/off
@@ -83,7 +83,7 @@ static void ResolveGameDir() {
 
     std::string logDir = std::string(g_gameDir) + "logs";
     CreateDirectoryA(logDir.c_str(), nullptr);           // harmless if it already exists
-    std::string log = logDir + "\\launcher.log";
+    std::string log = logDir + "\\Launcher.log";
     strncpy_s(g_logPath, log.c_str(), _TRUNCATE);
 }
 

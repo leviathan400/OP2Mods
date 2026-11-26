@@ -4,16 +4,24 @@
 // A plain Win32 dialog. odasl (OP2's skin engine, enabled around DialogBox via
 // wplEnable/wplDisable) auto-skins the dialog + standard controls to the OP2 look -
 // including drawing its own navy caption, so no Windows title-bar icon appears.
-IDD_PICKER DIALOGEX 0, 0, 300, 241
+//
+// Layout (dialog units): left column = filter, mission list and the type-a-name box;
+// right column = LAUNCH and CANCEL side by side, with the mission details panel under them.
+IDD_PICKER DIALOGEX 0, 0, 420, 241
 STYLE DS_SETFONT | DS_MODALFRAME | DS_SETFOREGROUND | WS_POPUP | WS_VISIBLE | WS_CAPTION
 CAPTION "Launch Into - pick a DLL"
 FONT 8, "MS Sans Serif"
 BEGIN
-    LTEXT           "Mission / scenario DLLs in this folder:", -1, 7, 6, 200, 9
-    LISTBOX         IDC_LIST, 7, 17, 210, 183,
+    LTEXT           "Filter (type the start of a name):", -1, 7, 6, 200, 9
+    EDITTEXT        IDC_FILTER, 7, 16, 210, 12, ES_AUTOHSCROLL
+    LTEXT           "Mission / scenario DLLs:", IDC_LISTLABEL, 7, 33, 210, 9
+    LISTBOX         IDC_LIST, 7, 44, 210, 156,
                     LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_BORDER | WS_TABSTOP
     LTEXT           "Or type any DLL name:", -1, 7, 205, 150, 9
     EDITTEXT        IDC_EDIT, 7, 216, 210, 12, ES_AUTOHSCROLL
-    DEFPUSHBUTTON   "LAUNCH", IDC_LAUNCH, 226, 17, 67, 16
-    PUSHBUTTON      "CANCEL", IDCANCEL, 226, 40, 67, 16
+    DEFPUSHBUTTON   "LAUNCH", IDC_LAUNCH, 228, 14, 88, 16
+    PUSHBUTTON      "CANCEL", IDCANCEL, 324, 14, 88, 16
+    LTEXT           "Mission details:", -1, 228, 44, 184, 9
+    // The details rows (x 228, y 56, 184 wide, 9 apart) are NOT here: picker.cpp's SetInfo
+    // creates them fresh for each mission - see the comment there.
 END

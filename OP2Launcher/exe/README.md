@@ -30,7 +30,13 @@ op2launcher.exe                 boot into [Launcher] Dll= from op2launcher.ini
 op2launcher.exe --picker | -p   boot into the in-game "Launch a DLL" picker
 op2launcher.exe --load | -l <save>  boot into a saved game   e.g. op2launcher.exe --load saves\SGAME0.OP2
 op2launcher.exe --uninstall | -u  remove Launcher from outpost2.ini (Launcher.dll stays on disk)
+op2launcher.exe --help | -h | -? | /?  show the usage
 ```
+
+The command line is checked **before anything is changed**. An unknown option (anything starting
+with `-`, e.g. a typo like `--pick`, or a short `/x`) or an extra argument prints an error and the
+usage and exits with code 1. The ini is left alone and Outpost 2 is not started. A mission name
+never starts with `-`.
 
 Every launch is **one-shot**. The launcher sets `Enabled=1` and `OneShot=1`, and the module sets
 `Enabled=0` again once it has fired. The next normal start of OPU is therefore unmodded, and the
@@ -53,7 +59,8 @@ override what you asked for this time.
 absolute path. The launcher checks the file exists before changing anything. In-game, the module
 loads it the same way the shell's own Load button does. A save made by a Lua mission loads with
 its script carrying on under OP2Lua 0.8.8 and later, which stores the script's state in the save.
-| `--uninstall` | removes `[ExternalModules] Launcher` and the whole `[Launcher]` section |
+
+`--uninstall` removes `[ExternalModules] Launcher` and the whole `[Launcher]` section.
 
 ### Mission name limit
 
@@ -77,11 +84,11 @@ Dll=
 
 | Code | Meaning |
 |---|---|
-| `0` | OPU was started (or `--uninstall` finished) |
-| `1` | usage error, mission name too long, saved game not found, `OPULauncher.exe` not found, or OPU failed to start |
+| `0` | OPU was started (or `--uninstall` / `--help` finished) |
+| `1` | unknown option, extra argument, usage error, mission name too long, saved game not found, `OPULauncher.exe` not found, or OPU failed to start |
 
 `0` only means OPULauncher was started. It doesn't mean the mission loaded. Check
-`<OPU>\logs\launcher.log` for that. "Could not load script file" in-game means the DLL name was
+`<OPU>\logs\Launcher.log` for that. "Could not load script file" in-game means the DLL name was
 wrong or the DLL lacks the required exports.
 
 ## Building
@@ -107,6 +114,6 @@ Copy `op2launcher` (and optionally `op2launcher.ini`) into the Wine prefix's OPU
 | `op2launcher.cpp` | the whole tool: ini install/uninstall, arg handling, starting OPU (Windows + POSIX) |
 | `op2launcher.ini` | default-mission config template |
 | `launcher.rc`, `ConVec.ico` | Windows icon and version info (FileDescription `OP2Launcher`) |
-| `..\launcher\version.h` | **the version number** (currently 0.9.6), shared with `Launcher.dll`; bump it there |
+| `..\launcher\version.h` | **the version number** (currently 0.9.7), shared with `Launcher.dll`; bump it there |
 | `CHANGELOG.md` | release history of `op2launcher.exe` |
 | `build.bat`, `build.sh` | Windows / Linux builds |
