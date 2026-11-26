@@ -1,0 +1,8 @@
+LIBRARY op2shot
+EXPORTS
+    InitMod
+    mod_init
+    mod_run
+    mod_destroy
+    DestroyMod
+    RunMod
