@@ -8,8 +8,6 @@ A small op2ext module for **OPU 1.4.1** that saves a `.bmp` on a hotkey. Three m
   tile grid - not limited to the viewport, and reflecting **live game state** (laid tubes, walls,
   bulldozed/levelled terrain, lava, scorch - everything the engine has baked into the tile data).
 
-Every image comes out at its final size, with no black or padded edges to crop afterwards.
-
 ## Status
 Tested in game on **OPU 1.4.1** (2026-11-26, Windows display scaling 125%, Zoom module off):
 

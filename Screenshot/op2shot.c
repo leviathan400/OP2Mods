@@ -19,7 +19,6 @@
  *   - Full map cannot be screen-grabbed (off-viewport map is never drawn), so we read the engine's
  *     in-memory tile grid + tilesets and render the image ourselves - only the playable area (the
  *     engine's map clip rect), so maps that don't wrap lose their unused padding. See RenderFullMap.
- * Every image comes out at its final size; nothing needs cropping afterwards.
  *
  * All three run on the game's own thread (from the keyboard hook or the BitBlt hook), so they see
  * a consistent frame / map and never race the engine.
@@ -206,7 +205,7 @@ static void SaveDcRegion(HDC src, int sx, int sy, int w, int h, const char *tag)
  * (>= MinWidth x MinHeight, which skips the small UI panels) is saved - the WHOLE surface, which is
  * the complete current view. Not just the area this call copies: the game often presents only the
  * part of the view that changed (e.g. 1138x481 after a scroll), so saving the copied area gives
- * fragments. The view surface is exactly the viewport size, so there is nothing to crop.
+ * fragments. The view surface is exactly the viewport size.
  * Inert (single branch) the rest of the time. */
 static BOOL WINAPI MyBitBlt(HDC hd,int x,int y,int w,int h,HDC hs,int sx,int sy,DWORD rop) {
     if (g_capture && hs) {
@@ -347,7 +346,7 @@ static void RenderFullMap(void) {
      * tiles are stored at double width with 32 unused columns on the left (and the rest on the right)
      * so they don't wrap; the clip rect covers only the real columns (x 32 .. width+31). 512-wide
      * maps wrap and have no x clip (-1 .. 0x7FFFFFFF). Clamped to the stored grid either way, so only
-     * the playable map is rendered - no padding to crop afterwards. */
+     * the playable map is rendered. */
     int x0 = *(int*)MAP_CLIPX1, y0 = *(int*)MAP_CLIPY1, x1 = *(int*)MAP_CLIPX2, y1 = *(int*)MAP_CLIPY2;
     if (x0 < 0) x0 = 0;  if (x1 > mapW - 1) x1 = mapW - 1;
     if (y0 < 0) y0 = 0;  if (y1 > mapH - 1) y1 = mapH - 1;
