@@ -1,4 +1,4 @@
-# UIExt: double-tap a control group to centre the camera
+# UIExt: double-tap a control group to centre the camera, double-click a vehicle to select its type
 
 A community mod (`UIExt.dll`, "UI Extension") written by **TH300**, who sent it to us.
 We reverse-engineered his DLL to find out what it does, then wrote clean, commented
@@ -14,6 +14,14 @@ Adds a feature Outpost 2 shipped without:
 > is still selected (a "double tap") and the **camera jumps to the group.**
 
 Without the mod, a second press does nothing more than the first.
+
+Our own addition (not in TH300's original), `DoubleClickSelect=1`:
+
+> **Double-click one of your vehicles** on the map and **every vehicle of yours of the same type
+> that is on screen** is selected (up to the game's limit of 32, nearest to the clicked one first).
+
+Tested in game on OPU 1.4.1 (2026-11-27): double-clicking a Lynx, a Tiger and a ConVec selected
+the 7, 7 and 3 of each type on screen.
 
 ## How it works
 
@@ -38,6 +46,28 @@ instructions the `JMP` replaced (`mov eax,[esp+4]; push ebx`), and continues the
 function at `0x0047BD55`. It checks the original bytes before patching and puts them
 back on unload.
 
+## How double-click select works
+
+The game never sees a double-click (its window classes have no `CS_DBLCLKS`), so UIExt times the
+two clicks itself, with the Windows double-click time.
+
+- Map clicks go through `MouseCommandFilter::OnUIEvent` (`0x0041ABC0`, `__thiscall`, args `wnd,
+  msg, wParam, lParam, userData`), reached through slot 0 of its vtable at `0x004CFC60`. UIExt
+  replaces that one vtable entry (after checking it still holds `0x0041ABC0`) with a wrapper that
+  calls the game's handler first.
+- After a plain left click (no Shift/Ctrl) over the map that left exactly one of your vehicles
+  selected, with the mouse on it, the wrapper notes the vehicle and the time. A second such click
+  on the same vehicle in time is a double-click.
+- Then: every one of your vehicles (`PlayerVehicleEnum`) with the same `map_id`, alive, inside
+  the visible map area (view left/top at view surface `+0x940`/`+0x944`, size = the map window's
+  client area), sorted nearest first, up to 32. The selection (`0x00547210`) is rebuilt the way
+  the game's own selection-history restore does it - `Clear` (`0x0041A9C0`) then `AddUnit`
+  (`0x0041A830`) per unit - then stored in the selection history (`0x0047BFD0`) and the game's
+  group-select sound plays.
+- Only vehicles: the game never selects several buildings. Same type means the same unit type -
+  a Laser Lynx and an EMP Lynx are both Lynx.
+- Selection is local UI state; no command is sent, so it is safe in multiplayer.
+
 ## Install (OPU 1.4.1)
 
 Build (or take) `UIExt.dll`, copy it to `OPU\UIExt.dll`, and add to
@@ -50,13 +80,15 @@ UIExt=yes
 [UIExt]
 Dll=UIExt.dll
 Enabled=1
+DoubleClickSelect=1
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Enabled` | `1` | `1` = double-tap centring on, `0` = off (the DLL loads but patches nothing) |
+| `Enabled` | `1` | `1` = on, `0` = off (the DLL loads but patches nothing) |
+| `DoubleClickSelect` | `1` | `1` = double-click a vehicle selects all of that type on screen, `0` = off |
 
-`Enabled` is read once at startup, so restart the game after changing it. The
+Settings are read once at startup, so restart the game after changing it. The
 `[ExternalModules]` line must stay `yes`: OPU's module loader only accepts `yes`/`no`
 there.
 
@@ -64,8 +96,11 @@ The log is `OPU\logs\UIExt.log`. A working start looks like:
 
 ```
 ==== op2uiext (recreated UIExt) startup 2026-11-25 21:03:24 ====
-INSTALLED: double-tap control group -> center camera. hook=730514E0
+INSTALLED: double-click a vehicle -> select that type on screen. hook=...
+INSTALLED: double-tap control group -> center camera. hook=...
 ```
+
+Each double-click logs a line such as `double-click: vehicle #95 (type 5) -> 7 selected on screen`.
 
 With `Enabled=0` it logs `DISABLED: ...` instead. If the exe's bytes are not the
 expected ones it logs `VERIFY FAILED ...` and patches nothing.

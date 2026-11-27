@@ -1,5 +1,10 @@
-/* op2uiext.c  -  UIExt ("UI Extension"): double-tap a control group to centre the camera
+/* op2uiext.c  -  UIExt ("UI Extension"): double-tap a control group to centre the camera,
+ *                and double-click a vehicle to select all of its type on screen
  * =====================================================================================
+ * The double-click select (DoubleClickSelect=1) is our own addition, not in TH300's
+ * original; see "DOUBLE-CLICK A VEHICLE" further down. Everything else in this header
+ * describes the double-tap feature.
+ *
  * A clean reimplementation of TH300's community mod UIExt.dll (original: 5.6 KB, built
  * 2022-09-05), reverse-engineered from that DLL.
  * Target: Outpost 2 OPU 1.4.1. The patched code is byte-identical in retail 1.3.6.
@@ -46,12 +51,14 @@
  * STATUS
  * ------
  * Tested in game on OPU 1.4.1 (2026-11-25): a double tap centres the camera, and with
- * the module off it does not.
+ * the module off it does not. Double-click select tested 2026-11-27: Lynx, Tiger and
+ * ConVec double-clicks selected every one of that type on screen.
  *
  * INSTALL (OPU 1.4.1, in OPU\outpost2.ini):
  *     [ExternalModules]  UIExt=yes        ; OPU's loader: must be yes/no, so leave it yes
  *     [UIExt]            Dll=UIExt.dll
- *                        Enabled=1        ; 1 = double-tap centring on, 0 = off
+ *                        Enabled=1        ; 1 = on, 0 = off (nothing at all is patched)
+ *                        DoubleClickSelect=1 ; 1 = double-click a vehicle selects that type on screen
  * With Enabled=0 the DLL still loads but patches nothing, so the game behaves as vanilla.
  * Enabled is read once at startup (missing = 1); restart the game after changing it.
  * Log: <game dir>\logs\UIExt.log (under OPU: OPU\logs\UIExt.log).
@@ -187,6 +194,202 @@ __declspec(naked) void UIExt_HookEntry(void)
     }
 }
 
+/* =====================================================================================
+ * DOUBLE-CLICK A VEHICLE: SELECT ALL OF YOUR VEHICLES OF THAT TYPE ON SCREEN
+ * ([UIExt] DoubleClickSelect=1)
+ * =====================================================================================
+ * The game never sees double-clicks (its window classes have no CS_DBLCLKS, so a second
+ * click is just another WM_LBUTTONDOWN), so the timing is done here.
+ *
+ * Map clicks go through MouseCommandFilter::OnUIEvent (0x0041ABC0), a __thiscall
+ * (this = the filter object at 0x005471B0; args wnd, msg, wParam, lParam, userData;
+ * ret 0x14), reached through slot 0 of the filter's vtable at 0x004CFC60. We replace
+ * that one vtable entry with ClickFilterHook, which calls the original first and then:
+ *   - a plain left click (no Shift/Ctrl) over the map that left exactly ONE of your
+ *     vehicles selected, with the mouse on that vehicle, is a "click on vehicle V";
+ *   - a click on the same vehicle V within the Windows double-click time of the last one
+ *     is a double-click: the selection becomes every one of your vehicles of V's type
+ *     (same map_id) inside the visible map area, nearest to V first, up to the game's
+ *     limit of 32 - built the way the game's own selection-history restore does it
+ *     (Clear, then AddUnit per unit), stored in the selection history, with the game's
+ *     group-select sound.
+ * Selection is local UI state only (no command packet is sent), so this is safe in
+ * multiplayer. Buildings are left alone (the game never selects several buildings).
+ */
+#define CLICK_VTBL_SLOT_VA  0x004CFC60u  /* MouseCommandFilter vtable, slot 0 = OnUIEvent         */
+#define CLICK_FILTER_VA     0x0041ABC0u  /* MouseCommandFilter::OnUIEvent (expected slot value)   */
+#define SEL_CLEAR_VA        0x0041A9C0u  /* UnitGroup::Clear(int userData)   - thiscall, no history */
+#define SEL_ADD_VA          0x0041A830u  /* UnitGroup::AddUnit(int id, int userData) - thiscall    */
+#define SEL_HISTORY_OBJ     0x0056CA00u  /* UnitSelectionHistory object                            */
+#define SEL_HISTORY_PUSH_VA 0x0047BFD0u  /* UnitSelectionHistory::CopySelectionToHistory() - thiscall */
+#define SOUND_MGR_OBJ       0x0056D250u  /* the sound manager                                      */
+#define SOUND_ADD_VA        0x0047EFD0u  /* SoundManager::AddGameSound(int sound, int players)     */
+#define SOUND_GROUP_SELECT  0x55         /*   the sound the band select plays for several units    */
+#define LOCAL_PLAYER_VA     0x00477F10u  /* static int TethysGame::LocalPlayer() (exported)        */
+#define PVE_CTOR_VA         0x0047A480u  /* PlayerVehicleEnum(int player)            (exported)    */
+#define PVE_NEXT_VA         0x0047A4B0u  /* int PlayerVehicleEnum::GetNext(Unit&)    (exported)    */
+#define UNIT_GETTYPE_VA     0x00475EE0u  /* map_id Unit::GetType() const             (exported)    */
+#define UNIT_POOL_PTR_VA    0x0054F848u  /* holds a POINTER to the unit records (0x78 bytes each)  */
+#define UNIT_STRIDE         0x78
+#define MAP_XMASK_VA        0x0054F7FCu  /* map pixel-x mask (wraps x on round-the-world maps)     */
+#define VIEW_SURFACE_VA     0x005758C8u  /* the detail pane's view surface pointer                 */
+#define DETAIL_HWND_VA      0x005758BCu  /* the detail pane's HWND (pane object 0x5758B4 + 8)      */
+#define MOUSE_ON_MAP_VA     0x0057B7ACu  /* non-zero while the mouse is over the map               */
+#define MOUSE_PX_VA         0x0057B7B4u  /* mouse position on the map, pixels (x, then y at +4)    */
+#define INPUT_BLOCKED_VA    0x0056E9E0u  /* non-zero while the game ignores input                  */
+#define SEL_MAX             32           /* the game's selection limit                             */
+/* Unit record fields used: +0x14/+0x18 pixel x/y, +0x22 action (10 = dying),
+ * +0x44 flags (2 = vehicle, 0x20000 = being destroyed). View surface: +0x940/+0x944 =
+ * view left/top in map pixels. */
+
+typedef int  (__fastcall *ClickFilter_t)(void *self, int edx, void *wnd, UINT msg, WPARAM wp, LPARAM lp, int user);
+typedef void (__fastcall *SelClear_t)(void *sel, int edx, int user);
+typedef int  (__fastcall *SelAdd_t)(void *sel, int edx, int id, int user);
+typedef void (__fastcall *Thiscall0_t)(void *self, int edx);
+typedef void (__fastcall *AddSound_t)(void *self, int edx, int sound, int players);
+typedef int  (__fastcall *LocalPlayer_t)(void);
+typedef void (__fastcall *EnumCtor_t)(void *self, int edx, int player);
+typedef int  (__fastcall *EnumNext_t)(void *self, int edx, int *unit);
+typedef int  (__fastcall *UnitFn_t)(int *unit, int edx);
+/* (The engine's __thiscall methods take `this` in ECX; a __fastcall function with a
+ * dummy second argument puts it in ECX the same way and leaves EDX unused.) */
+
+static ClickFilter_t g_origClick   = NULL;  /* the vtable entry we replaced (the game's handler) */
+static int           g_clickHooked = 0;     /* 1 while the vtable entry points at our hook       */
+static int           g_lastClickId = -1;    /* vehicle hit by the last single click, -1 = none   */
+static DWORD         g_lastClickMs = 0;     /*   and when (GetTickCount)                         */
+
+static unsigned char *UnitRec(int id) { return *(unsigned char **)UNIT_POOL_PTR_VA + (unsigned)id * UNIT_STRIDE; }
+static int UnitType(int id) { int h = id; return ((UnitFn_t)UNIT_GETTYPE_VA)(&h, 0); }
+
+/* A usable vehicle: a vehicle (flag 2), not being destroyed, not in the dying action. */
+static int LiveVehicle(int id)
+{
+    unsigned char *u = UnitRec(id);
+    unsigned flags = *(unsigned *)(u + 0x44);
+    return (flags & 2) && !(flags & 0x20000) && u[0x22] != 10;
+}
+
+/* Is the mouse on vehicle `id`? Within 24 pixels (3/4 of a tile) of its centre, measuring
+ * x through the map's wrap mask so round-the-world maps work too. */
+static int MouseOnUnit(int id)
+{
+    unsigned char *u = UnitRec(id);
+    unsigned mask = *(unsigned *)MAP_XMASK_VA;
+    int mx = *(int *)MOUSE_PX_VA, my = *(int *)(MOUSE_PX_VA + 4);
+    int dx = (int)(((unsigned)(mx - *(int *)(u + 0x14) + 24)) & mask);
+    int dy = my - *(int *)(u + 0x18);
+    return dx < 48 && dy > -24 && dy < 24;
+}
+
+/* Replace the selection with all of the local player's live vehicles of `type` inside
+ * the visible map area, nearest to `clicked` first, up to SEL_MAX. Returns how many. */
+static int SelectSameTypeOnScreen(int clicked, int type)
+{
+    unsigned char *surf = *(unsigned char **)VIEW_SURFACE_VA;
+    HWND  hwnd = *(HWND *)DETAIL_HWND_VA;
+    RECT  rc;
+    if (!surf || !hwnd || !GetClientRect(hwnd, &rc)) return 0;
+    unsigned mask = *(unsigned *)MAP_XMASK_VA;
+    int left = *(int *)(surf + 0x940) & (int)mask, top = *(int *)(surf + 0x944);
+    int w = rc.right, h = rc.bottom;                        /* view size in pixels (client area) */
+
+    /* collect matching on-screen vehicles with their squared distance to the clicked one */
+    static int ids[512]; static long long d2[512];
+    int n = 0;
+    int cx = *(int *)(UnitRec(clicked) + 0x14), cy = *(int *)(UnitRec(clicked) + 0x18);
+    char it[32] = {0}; int unit;
+    ((EnumCtor_t)PVE_CTOR_VA)(it, 0, ((LocalPlayer_t)LOCAL_PLAYER_VA)());
+    while (n < 512 && ((EnumNext_t)PVE_NEXT_VA)(it, 0, &unit)) {
+        if (!LiveVehicle(unit) || UnitType(unit) != type) continue;
+        unsigned char *u = UnitRec(unit);
+        int ux = *(int *)(u + 0x14), uy = *(int *)(u + 0x18);
+        int vx = (int)(((unsigned)(ux - left)) & mask);     /* x from the view's left edge, wrapped */
+        if (vx >= w || uy < top || uy >= top + h) continue; /* off screen */
+        long long ddx = (int)(((unsigned)(ux - cx + (int)(mask / 2))) & mask) - (int)(mask / 2);
+        long long ddy = uy - cy;
+        ids[n] = unit; d2[n] = ddx * ddx + ddy * ddy; n++;
+    }
+    if (n <= 1) return n;                                   /* only the clicked one: nothing to add */
+
+    /* nearest first (a simple selection sort; n is small) */
+    for (int i = 0; i < n - 1 && i < SEL_MAX; i++) {
+        int b = i;
+        for (int j = i + 1; j < n; j++) if (d2[j] < d2[b]) b = j;
+        int ti = ids[i]; ids[i] = ids[b]; ids[b] = ti;
+        long long td = d2[i]; d2[i] = d2[b]; d2[b] = td;
+    }
+    if (n > SEL_MAX) n = SEL_MAX;
+
+    /* rebuild the selection the way the game's history restore does, then record it */
+    ((SelClear_t)SEL_CLEAR_VA)((void *)SEL_BUFFER_VA, 0, 0);
+    for (int i = 0; i < n; i++) ((SelAdd_t)SEL_ADD_VA)((void *)SEL_BUFFER_VA, 0, ids[i], 0);
+    ((Thiscall0_t)SEL_HISTORY_PUSH_VA)((void *)SEL_HISTORY_OBJ, 0);
+    ((AddSound_t)SOUND_ADD_VA)((void *)SOUND_MGR_OBJ, 0, SOUND_GROUP_SELECT, -1);
+    return n;
+}
+
+/* Stands in for MouseCommandFilter::OnUIEvent (vtable slot 0). The game's handler always
+ * runs first and its result is returned unchanged; only a plain left click is looked at. */
+static int __fastcall ClickFilterHook(void *self, int edx, void *wnd, UINT msg, WPARAM wp, LPARAM lp, int user)
+{
+    int r = g_origClick(self, edx, wnd, msg, wp, lp, user);
+    if (msg != WM_LBUTTONDOWN) return r;
+    __try {
+        int *sel = (int *)SEL_BUFFER_VA;
+        int  id  = sel[0] == 1 ? sel[1] : -1;
+        if ((wp & (MK_SHIFT | MK_CONTROL)) || *(int *)INPUT_BLOCKED_VA || !*(int *)MOUSE_ON_MAP_VA ||
+            id < 0 || !LiveVehicle(id) || !MouseOnUnit(id)) {
+            g_lastClickId = -1;                              /* not a click on one vehicle */
+            return r;
+        }
+        DWORD now = GetTickCount();
+        if (id == g_lastClickId && now - g_lastClickMs <= GetDoubleClickTime()) {
+            int type = UnitType(id);
+            int n = SelectSameTypeOnScreen(id, type);
+            LogLine("double-click: vehicle #%d (type %d) -> %d selected on screen", id, type, n);
+            g_lastClickId = -1;                              /* a third click starts over */
+        } else {
+            g_lastClickId = id; g_lastClickMs = now;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_lastClickId = -1;
+        LogLine("double-click: fault 0x%08X caught", GetExceptionCode());
+    }
+    return r;
+}
+
+/* Point vtable slot 0 at ClickFilterHook, after checking it still holds the game's
+ * handler (so another mod's hook or a different exe is never overwritten). */
+static void InstallDoubleClick(void)
+{
+    void **slot = (void **)CLICK_VTBL_SLOT_VA;
+    if ((unsigned)*slot != CLICK_FILTER_VA) {
+        LogLine("double-click: VERIFY FAILED, vtable slot 0x%08X holds %p (want 0x%08X) - not hooked",
+                CLICK_VTBL_SLOT_VA, *slot, CLICK_FILTER_VA);
+        return;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(slot, 4, PAGE_READWRITE, &old)) { LogLine("double-click: VirtualProtect failed err=%lu", GetLastError()); return; }
+    g_origClick = (ClickFilter_t)*slot;
+    *slot = (void *)ClickFilterHook;
+    VirtualProtect(slot, 4, old, &old);
+    g_clickHooked = 1;
+    LogLine("INSTALLED: double-click a vehicle -> select that type on screen. hook=%p", ClickFilterHook);
+}
+
+static void UninstallDoubleClick(void)
+{
+    if (!g_clickHooked) return;
+    void **slot = (void **)CLICK_VTBL_SLOT_VA;
+    DWORD old = 0;
+    if (VirtualProtect(slot, 4, PAGE_READWRITE, &old)) {
+        *slot = (void *)g_origClick;
+        VirtualProtect(slot, 4, old, &old);
+    }
+    g_clickHooked = 0;
+}
+
 /* Patch the JMP into FUN_0047bd50. Runs once; logs a startup line and the result.
  * Refuses to patch (and only logs) if the 5 bytes are not the expected ones, so a
  * different or already-patched exe is never modified. */
@@ -206,6 +409,10 @@ static void Install(void)
             LogLine("DISABLED: [UIExt] Enabled=0 in %s - not patching (double tap does nothing).", ini);
             return;
         }
+        /* [UIExt] DoubleClickSelect: 1 (or missing) = double-click a vehicle to select all of
+         * that type on screen, 0 = off. Independent of the double-tap patch below. */
+        if (GetPrivateProfileIntA("UIExt", "DoubleClickSelect", 1, ini) != 0) InstallDoubleClick();
+        else LogLine("DoubleClickSelect=0 - double-click select off.");
     }
 
     /* 1. Check the bytes we are about to replace, and keep a copy for Uninstall(). */
@@ -237,6 +444,7 @@ static void Install(void)
  * and DLL_PROCESS_DETACH can both reach it); only the first call does anything. */
 static void Uninstall(void)
 {
+    UninstallDoubleClick();
     if (!g_installed) return;
     unsigned char *p = (unsigned char *)RECALL_GROUP_VA;
     DWORD old = 0;
