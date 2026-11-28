@@ -2,9 +2,9 @@
 # downloads the repo. The built files are kept as downloadable artifacts on each run.
 #
 #   windows: Launcher.dll + op2launcher.exe (OP2Launcher), Zoom.dll, UIExt.dll, op2shot.dll
-#            (Screenshot), MapSize.dll, BuildQueue.dll + BuildQueue-UI.exe and AutoRepair.dll +
-#            AutoRepair-UI.exe, with MSVC x86 through each mod's own build.bat (they find Visual
-#            Studio with vswhere).
+#            (Screenshot), MapSize.dll, BuildQueue.dll + BuildQueue-UI.exe, AutoRepair.dll +
+#            AutoRepair-UI.exe and Rally.dll + Rally-UI.exe, with MSVC x86 through each mod's own
+#            build.bat (they find Visual Studio with vswhere).
 #   linux:   the Linux op2launcher front-end (OP2Launcher/exe/build.sh, g++).
 #
 # CI can only prove the mods compile; behaviour in the game still needs testing in Outpost 2.
@@ -86,12 +86,24 @@ jobs:
           call AutoRepair\ui\build.bat
           if errorlevel 1 exit /b 1
 
+      - name: Build Rally.dll
+        shell: cmd
+        run: |
+          call Rally\build.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Build Rally-UI.exe
+        shell: cmd
+        run: |
+          call Rally\ui\build.bat
+          if errorlevel 1 exit /b 1
+
       # Outpost2.exe is 32-bit, so the DLLs it loads must be too (PE machine type 0x14C); the
       # tools around it are built the same way.
       - name: Check the builds are 32-bit
         shell: pwsh
         run: |
-          $files = 'OP2Launcher/launcher/Launcher.dll', 'OP2Launcher/exe/op2launcher.exe', 'Zoom/Zoom.dll', 'UIExt/UIExt.dll', 'Screenshot/op2shot.dll', 'MapSize/MapSize.dll', 'BuildQueue/BuildQueue.dll', 'BuildQueue/ui/BuildQueue-UI.exe', 'AutoRepair/AutoRepair.dll', 'AutoRepair/ui/AutoRepair-UI.exe'
+          $files = 'OP2Launcher/launcher/Launcher.dll', 'OP2Launcher/exe/op2launcher.exe', 'Zoom/Zoom.dll', 'UIExt/UIExt.dll', 'Screenshot/op2shot.dll', 'MapSize/MapSize.dll', 'BuildQueue/BuildQueue.dll', 'BuildQueue/ui/BuildQueue-UI.exe', 'AutoRepair/AutoRepair.dll', 'AutoRepair/ui/AutoRepair-UI.exe', 'Rally/Rally.dll', 'Rally/ui/Rally-UI.exe'
           $bad = 0
           foreach ($f in $files) {
             $b = [IO.File]::ReadAllBytes($f)
@@ -118,6 +130,8 @@ jobs:
             BuildQueue/ui/BuildQueue-UI.exe
             AutoRepair/AutoRepair.dll
             AutoRepair/ui/AutoRepair-UI.exe
+            Rally/Rally.dll
+            Rally/ui/Rally-UI.exe
           if-no-files-found: error
 
   linux:
