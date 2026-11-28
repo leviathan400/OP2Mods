@@ -1,5 +1,6 @@
 @echo off
-REM Build BuildQueue-UI.exe - the Dear ImGui viewer for the BuildQueue module (64-bit, standalone).
+REM Build BuildQueue-UI.exe - the Dear ImGui viewer for the BuildQueue module (32-bit, like the
+REM module it reads from; standalone).
 setlocal
 cd /d "%~dp0"
 
@@ -10,8 +11,8 @@ if exist "%VSWHERE%" (
   for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
 )
 if "%VSPATH%"=="" ( echo Could not locate Visual Studio via vswhere. & exit /b 1 )
-call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul
-if errorlevel 1 ( echo vcvarsall x64 failed & exit /b 1 )
+call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" x86 >nul
+if errorlevel 1 ( echo vcvarsall x86 failed & exit /b 1 )
 
 if not exist obj mkdir obj
 rc /nologo /fo obj\app.res app.rc

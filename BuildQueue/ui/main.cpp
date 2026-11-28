@@ -28,7 +28,7 @@
 //     you ordered there,
 //     and the Shift + BUILD IT batch (units left, with a bar)
 //
-// Build: build.bat (vswhere + MSVC, 64-bit; Dear ImGui 1.91.5 sources in imgui\, MIT licence;
+// Build: build.bat (vswhere + MSVC, 32-bit like BuildQueue.dll; Dear ImGui 1.91.5 sources in imgui\, MIT licence;
 // the icon, Tech_Vehicle.ico, comes in through app.rc).
 
 #define WIN32_LEAN_AND_MEAN

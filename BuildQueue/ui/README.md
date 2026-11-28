@@ -53,8 +53,8 @@ Started before the game, it waits for one.
 ```
 build.bat
 ```
-Finds Visual Studio via `vswhere` and builds `BuildQueue-UI.exe` (64-bit, Direct3D 11, static
-CRT - no extra DLLs needed).
+Finds Visual Studio via `vswhere` and builds `BuildQueue-UI.exe` (32-bit like `BuildQueue.dll`,
+Direct3D 11, static CRT - no extra DLLs needed).
 
 ## Files
 
